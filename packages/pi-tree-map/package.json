@@ -1,0 +1,19 @@
+{
+  "name": "@monochromatti/pi-tree-map",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Interactive session tree map extension for Pi",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "echo 'nothing to build'",
+    "check": "echo 'no checks configured yet'"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.66.0"
+  }
+}

@@ -6,6 +6,11 @@
   "workspaces": [
     "packages/*"
   ],
+  "pi": {
+    "extensions": [
+      "./packages/pi-tree-map/index.ts"
+    ]
+  },
   "scripts": {
     "check": "npm run -ws --if-present check",
     "build": "npm run -ws --if-present build"

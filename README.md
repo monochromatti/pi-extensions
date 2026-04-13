@@ -2,3 +2,16 @@
 
 Collection of local Pi extensions.
 
+## Packages
+
+- `packages/pi-tree-map` — interactive session tree map (`/map`).
+
+## Use locally
+
+Load directly from the package directory:
+
+```bash
+pi -e /Users/monochromatti/code/pi-extensions/packages/pi-tree-map
+```
+
+Or add it permanently in your Pi settings/extensions workflow.
