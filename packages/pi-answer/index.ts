@@ -102,7 +102,7 @@ Example output:
   ]
 }`;
 
-const CODEX_MODEL_ID = "gpt-5.1-codex-mini";
+const OPENAI_MINI_MODEL_ID = "gpt-5.4-mini";
 const HAIKU_MODEL_ID = "claude-haiku-4-5";
 
 const REPAIR_SYSTEM_PROMPT = `You repair JSON.
@@ -242,7 +242,7 @@ function sanitizeExtractionResult(value: unknown): ExtractionResult | null {
 }
 
 /**
- * Prefer Codex mini for extraction when available, otherwise fallback to haiku or the current model.
+ * Prefer GPT-5.4 mini for question extraction when available, otherwise fallback to haiku or the current model.
  */
 async function selectExtractionModels(currentModel: Model<Api>, modelRegistry: ModelRegistry): Promise<Model<Api>[]> {
 	const models: Model<Api>[] = [currentModel];
@@ -259,7 +259,7 @@ async function selectExtractionModels(currentModel: Model<Api>, modelRegistry: M
 		models.push(model);
 	};
 
-	await maybeAdd("openai-codex", CODEX_MODEL_ID);
+	await maybeAdd("openai-codex", OPENAI_MINI_MODEL_ID);
 	await maybeAdd("anthropic", HAIKU_MODEL_ID);
 
 	return models;
@@ -376,6 +376,7 @@ async function completeForJson(
 			apiKey: auth.apiKey,
 			headers: auth.headers,
 			signal,
+			reasoning: "low",
 			temperature: 0,
 		},
 	);
