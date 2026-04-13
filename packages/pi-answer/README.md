@@ -20,12 +20,14 @@ pi -e /Users/monochromatti/code/pi-extensions/packages/pi-answer
 
 1. Finds the last completed assistant message on the current branch
 2. Extracts questions as structured JSON with a model
-3. Opens an interactive multi-question answer UI
-4. Sends the compiled answers back into the session and triggers a turn
+3. If the assistant clearly included explicit options (for example A/B/C), shows those choices alongside each question
+4. Opens an interactive multi-question answer UI with a freeform reply for every question
+5. Sends the compiled answers back into the session and triggers a turn
 
 ## Controls
 
 - `Tab` / `Enter` — next question
 - `Shift+Tab` — previous question
 - `Shift+Enter` — newline in answer
+- `A` / `B` / `C` / ... — select a displayed option while the answer is empty
 - `Esc` — cancel

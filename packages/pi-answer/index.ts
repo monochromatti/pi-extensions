@@ -30,9 +30,15 @@ import {
 } from "@mariozechner/pi-tui";
 
 // Structured output format for question extraction
+interface ExtractedOption {
+	label?: string;
+	text: string;
+}
+
 interface ExtractedQuestion {
 	question: string;
 	context?: string;
+	options?: ExtractedOption[];
 }
 
 interface ExtractionResult {
@@ -53,7 +59,13 @@ Output a JSON object with this structure:
   "questions": [
     {
       "question": "The question text",
-      "context": "Optional context that helps answer the question"
+      "context": "Optional context that helps answer the question",
+      "options": [
+        {
+          "label": "A",
+          "text": "First option"
+        }
+      ]
     }
   ]
 }
@@ -63,6 +75,8 @@ Rules:
 - Keep questions in the order they appeared
 - Be concise with question text
 - Include context only when it provides essential information for answering
+- If the assistant clearly provides explicit alternatives (for example A/B/C, numbered choices, or a short list of mutually exclusive options), include them in \`options\`
+- Only include \`options\` when the original text clearly presents real choices; never invent options
 - If no questions are found, return {"questions": []}
 
 Example output:
@@ -73,7 +87,17 @@ Example output:
       "context": "We can only configure MySQL and PostgreSQL because of what is implemented."
     },
     {
-      "question": "Should we use TypeScript or JavaScript?"
+	    "question": "Should we use TypeScript or JavaScript?",
+	    "options": [
+	      {
+	        "label": "A",
+	        "text": "TypeScript"
+	      },
+	      {
+	        "label": "B",
+	        "text": "JavaScript"
+	      }
+	    ]
     }
   ]
 }`;
@@ -88,7 +112,13 @@ You will receive model output that was supposed to be valid JSON with this exact
   "questions": [
     {
       "question": "The question text",
-      "context": "Optional context that helps answer the question"
+      "context": "Optional context that helps answer the question",
+      "options": [
+        {
+          "label": "A",
+          "text": "First option"
+        }
+      ]
     }
   ]
 }
@@ -99,6 +129,117 @@ Return ONLY valid JSON.
 - No explanation
 - Preserve the original meaning
 - If the original text does not contain any valid questions, return {"questions": []}`;
+
+function fallbackOptionLabel(index: number): string {
+	return index < 26 ? String.fromCharCode(65 + index) : String(index + 1);
+}
+
+function normalizeOptionLabel(label: string | undefined, index: number, used: Set<string>): string {
+	const trimmed = (label || "").trim();
+	const simplified = trimmed.replace(/[\s.)\]:-]+$/g, "");
+	const rawCandidate = simplified || fallbackOptionLabel(index);
+	const candidate = /^[a-z]$/i.test(rawCandidate) ? rawCandidate.toUpperCase() : rawCandidate;
+	const normalizedKey = candidate.toLowerCase();
+	if (used.has(normalizedKey)) {
+		const fallback = fallbackOptionLabel(index);
+		used.add(fallback.toLowerCase());
+		return fallback;
+	}
+	used.add(normalizedKey);
+	return candidate;
+}
+
+function sanitizeOptions(options: unknown): ExtractedOption[] | undefined {
+	if (!Array.isArray(options) || options.length === 0) {
+		return undefined;
+	}
+
+	const usedLabels = new Set<string>();
+	const sanitized = options
+		.map((option, index): ExtractedOption | null => {
+			if (typeof option === "string") {
+				const text = option.trim();
+				if (!text) return null;
+				return {
+					label: normalizeOptionLabel(undefined, index, usedLabels),
+					text,
+				};
+			}
+
+			if (!option || typeof option !== "object") {
+				return null;
+			}
+
+			const optionLike = option as { label?: unknown; text?: unknown };
+			if (typeof optionLike.text !== "string") {
+				return null;
+			}
+
+			const text = optionLike.text.trim();
+			if (!text) {
+				return null;
+			}
+
+			return {
+				label: normalizeOptionLabel(
+					typeof optionLike.label === "string" ? optionLike.label : undefined,
+					index,
+					usedLabels,
+				),
+				text,
+			};
+		})
+		.filter((option): option is ExtractedOption => option !== null);
+
+	return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function sanitizeExtractionResult(value: unknown): ExtractionResult | null {
+	if (!value || typeof value !== "object") {
+		return null;
+	}
+
+	const candidate = value as { questions?: unknown };
+	if (!Array.isArray(candidate.questions)) {
+		return null;
+	}
+
+	const questions = candidate.questions
+		.map((question): ExtractedQuestion | null => {
+			if (!question || typeof question !== "object") {
+				return null;
+			}
+
+			const questionLike = question as {
+				question?: unknown;
+				context?: unknown;
+				options?: unknown;
+			};
+
+			if (typeof questionLike.question !== "string") {
+				return null;
+			}
+
+			const normalizedQuestion = questionLike.question.trim();
+			if (!normalizedQuestion) {
+				return null;
+			}
+
+			const normalizedContext =
+				typeof questionLike.context === "string" && questionLike.context.trim().length > 0
+					? questionLike.context.trim()
+					: undefined;
+
+			return {
+				question: normalizedQuestion,
+				context: normalizedContext,
+				options: sanitizeOptions(questionLike.options),
+			};
+		})
+		.filter((question): question is ExtractedQuestion => question !== null);
+
+	return { questions };
+}
 
 /**
  * Prefer Codex mini for extraction when available, otherwise fallback to haiku or the current model.
@@ -130,10 +271,7 @@ async function selectExtractionModels(currentModel: Model<Api>, modelRegistry: M
 function tryParseExtractionResult(text: string): ExtractionResult | null {
 	try {
 		const parsed = JSON.parse(text);
-		if (parsed && Array.isArray(parsed.questions)) {
-			return parsed as ExtractionResult;
-		}
-		return null;
+		return sanitizeExtractionResult(parsed);
 	} catch {
 		return null;
 	}
@@ -330,6 +468,7 @@ async function extractQuestionsWithModel(
 class QnAComponent implements Component {
 	private questions: ExtractedQuestion[];
 	private answers: string[];
+	private selectedOptions: Array<number | null>;
 	private currentIndex = 0;
 	private editor: Editor;
 	private tui: TUI;
@@ -351,6 +490,7 @@ class QnAComponent implements Component {
 	constructor(questions: ExtractedQuestion[], tui: TUI, onDone: (result: string | null) => void) {
 		this.questions = questions;
 		this.answers = questions.map(() => "");
+		this.selectedOptions = questions.map(() => null);
 		this.tui = tui;
 		this.onDone = onDone;
 
@@ -374,11 +514,6 @@ class QnAComponent implements Component {
 		};
 	}
 
-	private allQuestionsAnswered(): boolean {
-		this.saveCurrentAnswer();
-		return this.answers.every((a) => (a?.trim() || "").length > 0);
-	}
-
 	private saveCurrentAnswer(): void {
 		this.answers[this.currentIndex] = this.editor.getText();
 	}
@@ -389,6 +524,46 @@ class QnAComponent implements Component {
 		this.currentIndex = index;
 		this.editor.setText(this.answers[index] || "");
 		this.invalidate();
+	}
+
+	private formatOption(option: ExtractedOption): string {
+		return option.label ? `${option.label}) ${option.text}` : option.text;
+	}
+
+	private optionShortcutHint(question: ExtractedQuestion): string {
+		const labels = (question.options || [])
+			.map((option) => option.label?.trim())
+			.filter((label): label is string => !!label);
+		if (labels.length === 0) {
+			return "option";
+		}
+		if (labels.length <= 4) {
+			return labels.join("/");
+		}
+		return `${labels.slice(0, 4).join("/")}/...`;
+	}
+
+	private trySelectOptionFromInput(data: string): boolean {
+		const question = this.questions[this.currentIndex];
+		const options = question.options;
+		if (!options?.length) {
+			return false;
+		}
+
+		if (this.editor.getText() !== "" || data.length !== 1) {
+			return false;
+		}
+
+		const matchedIndex = options.findIndex((option) => option.label === data);
+		if (matchedIndex === -1) {
+			return false;
+		}
+
+		this.selectedOptions[this.currentIndex] =
+			this.selectedOptions[this.currentIndex] === matchedIndex ? null : matchedIndex;
+		this.invalidate();
+		this.tui.requestRender();
+		return true;
 	}
 
 	private submit(): void {
@@ -402,6 +577,13 @@ class QnAComponent implements Component {
 			parts.push(`Q: ${q.question}`);
 			if (q.context) {
 				parts.push(`> ${q.context}`);
+			}
+			const selectedOptionIndex = this.selectedOptions[i];
+			if (q.options?.length && selectedOptionIndex !== null && selectedOptionIndex !== undefined) {
+				const selectedOption = q.options[selectedOptionIndex];
+				if (selectedOption) {
+					parts.push(`Choice: ${this.formatOption(selectedOption)}`);
+				}
 			}
 			parts.push(`A: ${a}`);
 			parts.push("");
@@ -490,6 +672,10 @@ class QnAComponent implements Component {
 			return;
 		}
 
+		if (this.trySelectOptionFromInput(data)) {
+			return;
+		}
+
 		// Pass to editor
 		this.editor.handleInput(data);
 		this.invalidate();
@@ -565,6 +751,25 @@ class QnAComponent implements Component {
 			}
 		}
 
+		if (q.options?.length) {
+			lines.push(padToWidth(emptyBoxLine()));
+			const selectedOptionIndex = this.selectedOptions[this.currentIndex];
+			const optionHint = this.dim("Options (press the option label while the answer is empty)");
+			for (const line of wrapTextWithAnsi(optionHint, contentWidth)) {
+				lines.push(padToWidth(boxLine(line)));
+			}
+			for (let i = 0; i < q.options.length; i++) {
+				const option = q.options[i];
+				const isSelected = selectedOptionIndex === i;
+				const prefix = isSelected ? this.green("◉") : this.dim("◯");
+				const optionText = `${prefix} ${isSelected ? this.bold(this.formatOption(option)) : this.formatOption(option)}`;
+				const wrappedOption = wrapTextWithAnsi(optionText, contentWidth);
+				for (const line of wrappedOption) {
+					lines.push(padToWidth(boxLine(line)));
+				}
+			}
+		}
+
 		lines.push(padToWidth(emptyBoxLine()));
 
 		// Render the editor component (multi-line input) with padding
@@ -591,7 +796,10 @@ class QnAComponent implements Component {
 			lines.push(padToWidth(boxLine(truncateToWidth(confirmMsg, contentWidth))));
 		} else {
 			lines.push(padToWidth(this.dim("├" + horizontalLine(boxWidth - 2) + "┤")));
-			const controls = `${this.dim("Tab/Enter")} next · ${this.dim("Shift+Tab")} prev · ${this.dim("Shift+Enter")} newline · ${this.dim("Esc")} cancel`;
+			const optionControls = q.options?.length
+				? ` · ${this.dim(this.optionShortcutHint(q))} select option`
+				: "";
+			const controls = `${this.dim("Tab/Enter")} next · ${this.dim("Shift+Tab")} prev · ${this.dim("Shift+Enter")} newline${optionControls} · ${this.dim("Esc")} cancel`;
 			lines.push(padToWidth(boxLine(truncateToWidth(controls, contentWidth))));
 		}
 		lines.push(padToWidth(this.dim("╰" + horizontalLine(boxWidth - 2) + "╯")));
