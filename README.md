@@ -5,6 +5,7 @@ Collection of local Pi extensions.
 ## Packages
 
 - `packages/pi-tree-map` — interactive session tree map (`/map`).
+- `packages/pi-answer` — interactive question extraction and answering (`/answer`, `Ctrl+.`).
 
 ## Use locally
 
