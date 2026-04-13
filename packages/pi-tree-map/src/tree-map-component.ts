@@ -1,22 +1,24 @@
+import type { Theme } from "@mariozechner/pi-coding-agent";
 import { matchesKey } from "@mariozechner/pi-tui";
 import { FOOTER_TEXT } from "./constants.js";
 import { moveSelection } from "./navigation.js";
-import { renderTreeMap, type CameraState } from "./render-canvas.js";
+import { getTreeMapThemeSignature, renderTreeMap, type CameraState } from "./render-canvas.js";
 import type { FilterMode, LabelMode, TreeMapModel } from "./model.js";
 
 interface TreeMapComponentOptions {
 	tui: { requestRender: () => void; terminal: { rows: number } };
 	getModel: () => TreeMapModel;
+	getTheme: () => Theme;
 	getSelectedNodeId: () => string;
 	setSelectedNodeId: (id: string) => void;
 	getLabelMode: () => LabelMode;
 	getFilterMode: () => FilterMode;
-	getAiSummaryStatus: () => string;
+	getLabelStatus: () => string;
 	onEnter: (nodeId: string) => Promise<void>;
 	onClose: () => void;
 	onCycleLabel: () => Promise<void>;
 	onCycleFilter: () => Promise<void>;
-	onToggleAiSummary: () => Promise<void>;
+	onToggleAutoLabel: () => Promise<void>;
 }
 
 export class TreeMapComponent {
@@ -25,6 +27,7 @@ export class TreeMapComponent {
 	private cacheWidth = 0;
 	private cacheHeight = 0;
 	private cacheVersion = -1;
+	private cacheThemeSignature = "";
 	private version = 0;
 	private cached: string[] = [];
 	private busy = false;
@@ -41,18 +44,26 @@ export class TreeMapComponent {
 
 	render(width: number): string[] {
 		const height = Math.max(6, this.opts.tui.terminal.rows || 24);
-		if (width === this.cacheWidth && height === this.cacheHeight && this.cacheVersion === this.version) {
+		const theme = this.opts.getTheme();
+		const themeSignature = getTreeMapThemeSignature(theme);
+		if (
+			width === this.cacheWidth &&
+			height === this.cacheHeight &&
+			this.cacheVersion === this.version &&
+			this.cacheThemeSignature === themeSignature
+		) {
 			return this.cached;
 		}
 		const model = this.opts.getModel();
 		const selectedId = this.opts.getSelectedNodeId();
 		const status = this.busy
 			? "Working..."
-			: `${FOOTER_TEXT} | Mode:${this.opts.getLabelMode()} | Filter:${this.opts.getFilterMode()} | ${this.opts.getAiSummaryStatus()}`;
-		this.cached = renderTreeMap(model, selectedId, this.camera, width, height, status);
+			: `${FOOTER_TEXT} | Mode:${this.opts.getLabelMode()} | Filter:${this.opts.getFilterMode()} | ${this.opts.getLabelStatus()}`;
+		this.cached = renderTreeMap(model, selectedId, this.camera, width, height, status, theme);
 		this.cacheWidth = width;
 		this.cacheHeight = height;
 		this.cacheVersion = this.version;
+		this.cacheThemeSignature = themeSignature;
 		return this.cached;
 	}
 
@@ -107,7 +118,7 @@ export class TreeMapComponent {
 
 		if (data === "a" || data === "A") {
 			void this.withBusy(async () => {
-				await this.opts.onToggleAiSummary();
+				await this.opts.onToggleAutoLabel();
 				this.invalidate();
 			});
 		}

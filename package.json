@@ -8,8 +8,9 @@
   ],
   "pi": {
     "extensions": [
-      "./packages/pi-tree-map/index.ts"
+      "./packages/pi-tree-map/index.ts",
       "./packages/pi-answer/index.ts",
+      "./packages/pi-auto-label/index.ts"
     ]
   },
   "scripts": {

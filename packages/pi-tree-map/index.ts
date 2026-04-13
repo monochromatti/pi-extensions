@@ -6,7 +6,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand(COMMAND_NAME, {
 		description: "Open interactive session tree map",
 		handler: async (_args, ctx) => {
-			await openTreeMap(ctx);
+			await openTreeMap(pi, ctx);
 		},
 	});
 }

@@ -1,3 +1,4 @@
+import type { Theme } from "@mariozechner/pi-coding-agent";
 import { FOOTER_TEXT, NODE_H } from "./constants.js";
 import { truncate } from "./format.js";
 import type { MapNode, TreeMapModel } from "./model.js";
@@ -70,11 +71,11 @@ function drawEdge(canvas: string[][], from: MapNode, to: MapNode, label: string)
 	}
 }
 
-function drawNode(canvas: string[][], node: MapNode, selected: boolean): void {
+function drawNode(canvas: string[][], node: MapNode): void {
 	const x = node.x;
 	const y = node.y;
 	const w = node.w;
-	const marker = selected ? "▶" : node.isCurrent ? "◆" : "●";
+	const marker = node.isCurrent ? "◆" : "●";
 
 	text(canvas, x, y, `╭${"─".repeat(Math.max(0, w - 2))}╮`);
 	text(canvas, x, y + NODE_H - 1, `╰${"─".repeat(Math.max(0, w - 2))}╯`);
@@ -83,6 +84,54 @@ function drawNode(canvas: string[][], node: MapNode, selected: boolean): void {
 
 	text(canvas, x + 1, y + 1, `${marker} ${truncate(node.title, Math.max(0, w - 5))}`);
 	text(canvas, x + 1, y + 2, truncate(node.subtitle, Math.max(0, w - 3)));
+}
+
+const RESET_STYLE = "\x1b[0m";
+
+interface TreeMapStyles {
+	selectedNodeStyle: string;
+	userRoleStyle: string;
+	assistantRoleStyle: string;
+	messageRoleStyle: string;
+}
+
+function getTreeMapStyles(theme: Theme): TreeMapStyles {
+	return {
+		selectedNodeStyle: `${theme.getFgAnsi("borderAccent")}\x1b[1m`,
+		userRoleStyle: theme.getFgAnsi("accent"),
+		assistantRoleStyle: theme.getFgAnsi("success"),
+		messageRoleStyle: theme.getFgAnsi("border"),
+	};
+}
+
+export function getTreeMapThemeSignature(theme: Theme): string {
+	const styles = getTreeMapStyles(theme);
+	return [styles.selectedNodeStyle, styles.userRoleStyle, styles.assistantRoleStyle, styles.messageRoleStyle].join("|");
+}
+
+function colorizeNonSpaceRange(line: string, start: number, endExclusive: number, style: string): string {
+	if (start >= endExclusive || endExclusive <= 0 || start >= line.length) return line;
+	const safeStart = Math.max(0, start);
+	const safeEnd = Math.min(line.length, endExclusive);
+	if (safeStart >= safeEnd) return line;
+
+	let out = "";
+	let styled = false;
+	for (let i = 0; i < line.length; i++) {
+		const ch = line[i]!;
+		const inRange = i >= safeStart && i < safeEnd;
+		const shouldStyle = inRange && ch !== " ";
+		if (shouldStyle && !styled) {
+			out += style;
+			styled = true;
+		} else if (!shouldStyle && styled) {
+			out += RESET_STYLE;
+			styled = false;
+		}
+		out += ch;
+	}
+	if (styled) out += RESET_STYLE;
+	return out;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -157,7 +206,7 @@ function wrapText(textValue: string, width: number, maxLines: number): string[] 
 	return lines;
 }
 
-function buildSelectedModalLines(selected: MapNode, viewportWidth: number, maxHeight: number): string[] {
+function buildSelectedModalLines(selected: MapNode, viewportWidth: number, maxHeight: number, theme: Theme): string[] {
 	if (viewportWidth < 36 || maxHeight < 6) return [];
 
 	const modalWidth = clamp(Math.floor(viewportWidth * 0.72), 42, Math.max(42, viewportWidth - 2));
@@ -165,15 +214,15 @@ function buildSelectedModalLines(selected: MapNode, viewportWidth: number, maxHe
 	const titleLines = wrapText(selected.title.replace(/\s+/g, " "), contentWidth, 2);
 	const firstMessage = (selected.firstBranchMessage || "(No message found in this branch segment)").replace(/\s+/g, " ");
 	const role = selected.firstBranchMessageRole === "assistant" ? "assistant" : selected.firstBranchMessageRole === "user" ? "user" : "message";
-	const roleColor = role === "user" ? "\x1b[34;1m" : role === "assistant" ? "\x1b[32;1m" : "\x1b[36;1m";
-	const reset = "\x1b[0m";
+	const styles = getTreeMapStyles(theme);
+	const roleColor =
+		role === "user" ? styles.userRoleStyle : role === "assistant" ? styles.assistantRoleStyle : styles.messageRoleStyle;
+	const reset = RESET_STYLE;
 
 	const bodyCapacity = Math.max(4, maxHeight - 2);
 	const bodyLines: string[] = [];
-	bodyLines.push("\x1b[1mSelected node\x1b[0m");
-	bodyLines.push("\x1b[1mTitle\x1b[0m");
 	for (const t of titleLines) bodyLines.push(clipNoEllipsis(t, contentWidth));
-	bodyLines.push("\x1b[1mFirst message in branch\x1b[0m");
+	bodyLines.push("");
 
 	const remaining = Math.max(1, bodyCapacity - bodyLines.length);
 	const prefixPlain = `${role}: `;
@@ -208,14 +257,16 @@ export function renderTreeMap(
 	viewportWidth: number,
 	viewportHeight: number,
 	status: string,
+	theme: Theme,
 ): string[] {
 	const safeHeight = Math.max(6, viewportHeight);
 	const nodeById = new Map(model.nodes.map((n) => [n.nodeId, n]));
 	const selected = nodeById.get(selectedNodeId);
+	const styles = getTreeMapStyles(theme);
 
 	const footerHeight = 1;
 	const maxModalHeight = Math.max(0, safeHeight - footerHeight - 6);
-	const modalLines = selected ? buildSelectedModalLines(selected, viewportWidth, Math.min(9, maxModalHeight)) : [];
+	const modalLines = selected ? buildSelectedModalLines(selected, viewportWidth, Math.min(9, maxModalHeight), theme) : [];
 	const modalReserveExtra = modalLines.length > 0 ? 4 : 0;
 	const belowAreaTarget = modalLines.length + modalReserveExtra;
 	const mapHeight = Math.max(4, safeHeight - footerHeight - belowAreaTarget);
@@ -246,6 +297,7 @@ export function renderTreeMap(
 
 	const drawNodes = model.nodes.map((n) => ({ ...n, x: n.x + renderOffsetX, y: n.y + renderOffsetY }));
 	const drawNodeById = new Map(drawNodes.map((n) => [n.nodeId, n]));
+	const selectedDrawNode = selected ? drawNodeById.get(selectedNodeId) : undefined;
 
 	const maxX = drawNodes.reduce((m, n) => Math.max(m, n.x + n.w + 4), 0);
 	const maxY = drawNodes.reduce((m, n) => Math.max(m, n.y + n.h + 2), 0);
@@ -260,7 +312,7 @@ export function renderTreeMap(
 		drawEdge(canvas, from, to, edge.label);
 	}
 	for (const node of drawNodes) {
-		drawNode(canvas, node, node.nodeId === selectedNodeId);
+		drawNode(canvas, node);
 	}
 
 	const lines: string[] = [];
@@ -275,6 +327,11 @@ export function renderTreeMap(
 		for (let col = 0; col < viewportWidth; col++) {
 			const worldCol = col + camera.cameraX;
 			line += worldCol >= 0 && worldCol < source.length ? source[worldCol] : " ";
+		}
+		if (selectedDrawNode && worldRow >= selectedDrawNode.y && worldRow < selectedDrawNode.y + selectedDrawNode.h) {
+			const start = selectedDrawNode.x - camera.cameraX;
+			const endExclusive = selectedDrawNode.x + selectedDrawNode.w - camera.cameraX;
+			line = colorizeNonSpaceRange(line, start, endExclusive, styles.selectedNodeStyle);
 		}
 		lines.push(line);
 	}
