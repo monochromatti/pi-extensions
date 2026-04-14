@@ -940,8 +940,4 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => answerHandler(ctx),
 	});
 
-	pi.registerShortcut("ctrl+.", {
-		description: "Extract and answer questions",
-		handler: answerHandler,
-	});
 }

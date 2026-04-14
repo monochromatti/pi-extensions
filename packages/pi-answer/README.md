@@ -12,10 +12,6 @@ pi -e /Users/monochromatti/code/pi-extensions/packages/pi-answer
 
 - `/answer` — extract questions from the last assistant message and answer them in a custom TUI
 
-## Shortcut
-
-- `Ctrl+.` — open the same Q&A flow
-
 ## Flow
 
 1. Finds the last completed assistant message on the current branch
