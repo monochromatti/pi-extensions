@@ -11,6 +11,7 @@ const PENDING_WAIT_MS = 5000;
 const PENDING_POLL_MS = 100;
 
 const pendingLabelIds = new Set<string>();
+const LABELABLE_MESSAGE_ROLES = new Set(["user", "assistant"]);
 
 interface LabelAttemptResult {
 	status: "labeled" | "skipped-existing" | "skipped-in-flight" | "failed";
@@ -129,11 +130,15 @@ function buildSnapshot(ctx: ExtensionContext): Snapshot {
 	return { entries, currentLeafId: currentLeafId || undefined, labelById };
 }
 
+function isLabelableMapNode(entry: RawEntry): boolean {
+	return entry.type === "message" && LABELABLE_MESSAGE_ROLES.has(entry.message?.role || "");
+}
+
 function getMapNodeCandidates(ctx: ExtensionContext): RawEntry[] {
 	const snapshot = buildSnapshot(ctx);
 	const candidateIds = getMapStructuralEntryIds(snapshot, "all");
 	const byId = new Map(snapshot.entries.map((entry) => [entry.id, entry] as const));
-	return candidateIds.map((id) => byId.get(id)).filter((entry): entry is RawEntry => !!entry);
+	return candidateIds.map((id) => byId.get(id)).filter((entry): entry is RawEntry => !!entry && isLabelableMapNode(entry));
 }
 
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -296,6 +301,7 @@ export async function startPersistentLabelsForEntryIds(
 	const targets = [...new Set(entryIds)]
 		.map((id) => byId.get(id))
 		.filter((entry): entry is RawEntry => !!entry)
+		.filter((entry) => isLabelableMapNode(entry))
 		.filter((entry) => !ctx.sessionManager.getLabel(entry.id));
 
 	if (targets.length === 0) {
