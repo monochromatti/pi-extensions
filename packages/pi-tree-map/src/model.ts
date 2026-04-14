@@ -11,6 +11,8 @@ export interface RawEntry {
 		content?: Array<{ type?: string; text?: string }>;
 		usage?: { totalTokens?: number };
 	};
+	summary?: string;
+	fromId?: string;
 	usage?: { totalTokens?: number };
 }
 

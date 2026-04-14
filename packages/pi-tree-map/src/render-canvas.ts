@@ -16,58 +16,118 @@ function inBounds(canvas: string[][], x: number, y: number): boolean {
 	return y >= 0 && y < canvas.length && x >= 0 && x < (canvas[0]?.length || 0);
 }
 
-const JOIN = new Map<string, string>([
-	["─│", "┼"],
-	["│─", "┼"],
-	["├─", "├"],
-	["┤─", "┤"],
-	["─├", "├"],
-	["─┤", "┤"],
-	["─┼", "┼"],
-	["│┼", "┼"],
+const DIR_UP = 1;
+const DIR_RIGHT = 2;
+const DIR_DOWN = 4;
+const DIR_LEFT = 8;
+
+const MASK_TO_BOX = new Map<number, string>([
+	[DIR_LEFT, "─"],
+	[DIR_RIGHT, "─"],
+	[DIR_UP, "│"],
+	[DIR_DOWN, "│"],
+	[DIR_LEFT | DIR_RIGHT, "─"],
+	[DIR_UP | DIR_DOWN, "│"],
+	[DIR_RIGHT | DIR_DOWN, "┌"],
+	[DIR_LEFT | DIR_DOWN, "┐"],
+	[DIR_UP | DIR_RIGHT, "└"],
+	[DIR_UP | DIR_LEFT, "┘"],
+	[DIR_UP | DIR_DOWN | DIR_RIGHT, "├"],
+	[DIR_UP | DIR_DOWN | DIR_LEFT, "┤"],
+	[DIR_LEFT | DIR_RIGHT | DIR_DOWN, "┬"],
+	[DIR_LEFT | DIR_RIGHT | DIR_UP, "┴"],
+	[DIR_UP | DIR_RIGHT | DIR_DOWN | DIR_LEFT, "┼"],
+]);
+
+const BOX_TO_MASK = new Map<string, number>([
+	["─", DIR_LEFT | DIR_RIGHT],
+	["│", DIR_UP | DIR_DOWN],
+	["┌", DIR_RIGHT | DIR_DOWN],
+	["┐", DIR_LEFT | DIR_DOWN],
+	["└", DIR_UP | DIR_RIGHT],
+	["┘", DIR_UP | DIR_LEFT],
+	["├", DIR_UP | DIR_DOWN | DIR_RIGHT],
+	["┤", DIR_UP | DIR_DOWN | DIR_LEFT],
+	["┬", DIR_LEFT | DIR_RIGHT | DIR_DOWN],
+	["┴", DIR_LEFT | DIR_RIGHT | DIR_UP],
+	["┼", DIR_UP | DIR_RIGHT | DIR_DOWN | DIR_LEFT],
 ]);
 
 function put(canvas: string[][], x: number, y: number, ch: string): void {
 	if (!inBounds(canvas, x, y)) return;
-	const prev = canvas[y][x];
-	if (prev === " " || prev === ch) {
-		canvas[y][x] = ch;
-		return;
-	}
-	const merged = JOIN.get(`${prev}${ch}`) || JOIN.get(`${ch}${prev}`) || ch;
-	canvas[y][x] = merged;
+	canvas[y][x] = ch;
 }
 
 function text(canvas: string[][], x: number, y: number, s: string): void {
 	for (let i = 0; i < s.length; i++) put(canvas, x + i, y, s[i]!);
 }
 
+function putLine(canvas: string[][], x: number, y: number, mask: number): void {
+	if (!inBounds(canvas, x, y) || mask === 0) return;
+	const prev = canvas[y][x]!;
+	if (prev !== " ") {
+		const prevMask = BOX_TO_MASK.get(prev);
+		if (prevMask === undefined) return;
+		mask |= prevMask;
+	}
+	canvas[y][x] = MASK_TO_BOX.get(mask) || prev;
+}
+
 function drawH(canvas: string[][], x1: number, x2: number, y: number): void {
 	const start = Math.min(x1, x2);
 	const end = Math.max(x1, x2);
-	for (let x = start; x <= end; x++) put(canvas, x, y, "─");
+	for (let x = start; x <= end; x++) {
+		let mask = 0;
+		if (x > start) mask |= DIR_LEFT;
+		if (x < end) mask |= DIR_RIGHT;
+		if (mask === 0) mask = DIR_LEFT | DIR_RIGHT;
+		putLine(canvas, x, y, mask);
+	}
 }
 
 function drawV(canvas: string[][], x: number, y1: number, y2: number): void {
 	const start = Math.min(y1, y2);
 	const end = Math.max(y1, y2);
-	for (let y = start; y <= end; y++) put(canvas, x, y, "│");
+	for (let y = start; y <= end; y++) {
+		let mask = 0;
+		if (y > start) mask |= DIR_UP;
+		if (y < end) mask |= DIR_DOWN;
+		if (mask === 0) mask = DIR_UP | DIR_DOWN;
+		putLine(canvas, x, y, mask);
+	}
 }
 
-function drawEdge(canvas: string[][], from: MapNode, to: MapNode, label: string): void {
-	const x1 = from.x + from.w;
-	const y1 = from.y + 1;
-	const x2 = to.x - 1;
-	const y2 = to.y + 1;
-	const midX = Math.max(x1 + 2, Math.floor((x1 + x2) / 2));
+function getConnectorY(node: MapNode): number {
+	return node.y + 1;
+}
 
-	drawH(canvas, x1, midX, y1);
-	drawV(canvas, midX, y1, y2);
-	drawH(canvas, midX, x2, y2);
+function drawEdgeGroup(canvas: string[][], parent: MapNode, children: MapNode[]): void {
+	if (children.length === 0) return;
+	const sortedChildren = [...children].sort((a, b) => getConnectorY(a) - getConnectorY(b));
+	const startX = parent.x + parent.w;
+	const endX = Math.min(...sortedChildren.map((child) => child.x - 1));
+	const parentY = getConnectorY(parent);
 
-	if (label) {
-		const lx = Math.min(midX + 1, x2 - label.length - 1);
-		text(canvas, Math.max(lx, x1 + 1), Math.min(y1, y2), truncate(label, 12));
+	if (endX < startX) return;
+
+	if (sortedChildren.length === 1) {
+		drawH(canvas, startX, endX, parentY);
+		if (parentY !== getConnectorY(sortedChildren[0]!)) {
+			drawV(canvas, endX, parentY, getConnectorY(sortedChildren[0]!));
+		}
+		return;
+	}
+
+	const trunkX = Math.max(startX + 1, Math.floor((startX + endX) / 2));
+	const childYs = sortedChildren.map((child) => getConnectorY(child));
+	const topY = Math.min(parentY, ...childYs);
+	const bottomY = Math.max(parentY, ...childYs);
+
+	drawH(canvas, startX, trunkX, parentY);
+	drawV(canvas, trunkX, topY, bottomY);
+
+	for (const child of sortedChildren) {
+		drawH(canvas, trunkX, child.x - 1, getConnectorY(child));
 	}
 }
 
@@ -77,10 +137,16 @@ function drawNode(canvas: string[][], node: MapNode): void {
 	const w = node.w;
 	const marker = node.isCurrent ? "◆" : "●";
 
-	text(canvas, x, y, `╭${"─".repeat(Math.max(0, w - 2))}╮`);
-	text(canvas, x, y + NODE_H - 1, `╰${"─".repeat(Math.max(0, w - 2))}╯`);
-	text(canvas, x, y + 1, `│${" ".repeat(Math.max(0, w - 2))}│`);
-	text(canvas, x, y + 2, `│${" ".repeat(Math.max(0, w - 2))}│`);
+	putLine(canvas, x, y, DIR_RIGHT | DIR_DOWN);
+	putLine(canvas, x + w - 1, y, DIR_LEFT | DIR_DOWN);
+	putLine(canvas, x, y + NODE_H - 1, DIR_UP | DIR_RIGHT);
+	putLine(canvas, x + w - 1, y + NODE_H - 1, DIR_UP | DIR_LEFT);
+	drawH(canvas, x + 1, x + w - 2, y);
+	drawH(canvas, x + 1, x + w - 2, y + NODE_H - 1);
+	drawV(canvas, x, y + 1, y + NODE_H - 2);
+	drawV(canvas, x + w - 1, y + 1, y + NODE_H - 2);
+	text(canvas, x + 1, y + 1, " ".repeat(Math.max(0, w - 2)));
+	text(canvas, x + 1, y + 2, " ".repeat(Math.max(0, w - 2)));
 
 	text(canvas, x + 1, y + 1, `${marker} ${truncate(node.title, Math.max(0, w - 5))}`);
 	text(canvas, x + 1, y + 2, truncate(node.subtitle, Math.max(0, w - 3)));
@@ -305,11 +371,18 @@ export function renderTreeMap(
 	const worldH = Math.max(mapHeight + camera.cameraY, maxY + 2);
 	const canvas = blankCanvas(worldW, worldH);
 
+	const childrenByParentId = new Map<string, MapNode[]>();
 	for (const edge of model.edges) {
 		const from = drawNodeById.get(edge.fromNodeId);
 		const to = drawNodeById.get(edge.toNodeId);
 		if (!from || !to) continue;
-		drawEdge(canvas, from, to, edge.label);
+		if (!childrenByParentId.has(from.nodeId)) childrenByParentId.set(from.nodeId, []);
+		childrenByParentId.get(from.nodeId)!.push(to);
+	}
+	for (const [parentId, children] of childrenByParentId) {
+		const parent = drawNodeById.get(parentId);
+		if (!parent) continue;
+		drawEdgeGroup(canvas, parent, children);
 	}
 	for (const node of drawNodes) {
 		drawNode(canvas, node);
