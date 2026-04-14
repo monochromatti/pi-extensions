@@ -14,7 +14,7 @@ Or add the package to your Pi extensions configuration.
 
 ## Behavior
 
-- On every `turn_end`, the extension finds the latest unlabeled structural `/map` node that is a `user` or `assistant` message
+- On every `turn_end`, the extension finds the latest unlabeled structural `/map` node that is a `user` or `assistant` message, or a `branch_summary` node
 - If that entry already has a label, it does nothing
 - Otherwise it generates a short 2-5 word label in Sentence case with `anthropic/claude-haiku-4-5`
 - The generated label is persisted with `pi.setLabel(...)`
@@ -28,7 +28,7 @@ The prompt uses a small recent window from the node path to the root so labels r
 
 Backfill is conservative:
 
-- it only considers structural nodes that are `user` or `assistant` messages
+- it only considers structural nodes that are `user` or `assistant` messages, plus `branch_summary` nodes
 - it skips nodes that already have labels
 - it does not overwrite manual labels
 - it shares in-flight work with `/map` so the same node is not labeled twice concurrently

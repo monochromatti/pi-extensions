@@ -12,6 +12,7 @@ const PENDING_POLL_MS = 100;
 
 const pendingLabelIds = new Set<string>();
 const LABELABLE_MESSAGE_ROLES = new Set(["user", "assistant"]);
+const LABELABLE_ENTRY_TYPES = new Set(["branch_summary"]);
 
 interface LabelAttemptResult {
 	status: "labeled" | "skipped-existing" | "skipped-in-flight" | "failed";
@@ -38,6 +39,11 @@ export interface PersistedLabelController {
 }
 
 function extractMessageText(entry: RawEntry): string | undefined {
+	if (entry.type === "branch_summary") {
+		const text = entry.summary?.trim();
+		if (!text) return undefined;
+		return text.replace(/\s+/g, " ");
+	}
 	if (entry.type !== "message") return undefined;
 	const text = (entry.message?.content || [])
 		.filter((part) => part.type === "text" && typeof part.text === "string")
@@ -84,6 +90,9 @@ function describeTarget(entry: RawEntry): string {
 	if (entry.type === "message") {
 		return `${entry.message?.role || "unknown"} message`;
 	}
+	if (entry.type === "branch_summary") {
+		return "branch summary";
+	}
 	return `${entry.type} entry`;
 }
 
@@ -97,8 +106,8 @@ function buildPrompt(entry: RawEntry, entries: RawEntry[]): string {
 		if (!pathEntry) continue;
 		const text = extractMessageText(pathEntry);
 		if (!text) continue;
-		const role = pathEntry.message?.role || "unknown";
-		const prefix = id === entry.id ? `TARGET ${role}` : role;
+		const kind = pathEntry.type === "branch_summary" ? "branch_summary" : (pathEntry.message?.role || "unknown");
+		const prefix = id === entry.id ? `TARGET ${kind}` : kind;
 		lines.push(`${prefix}: ${truncate(text, MAX_MESSAGE_CHARS)}`);
 	}
 
@@ -130,15 +139,15 @@ function buildSnapshot(ctx: ExtensionContext): Snapshot {
 	return { entries, currentLeafId: currentLeafId || undefined, labelById };
 }
 
-function isLabelableMapNode(entry: RawEntry): boolean {
-	return entry.type === "message" && LABELABLE_MESSAGE_ROLES.has(entry.message?.role || "");
+function isAutoLabelTargetEntry(entry: RawEntry): boolean {
+	return LABELABLE_ENTRY_TYPES.has(entry.type) || LABELABLE_MESSAGE_ROLES.has(entry.message?.role || "");
 }
 
 function getMapNodeCandidates(ctx: ExtensionContext): RawEntry[] {
 	const snapshot = buildSnapshot(ctx);
 	const candidateIds = getMapStructuralEntryIds(snapshot, "all");
 	const byId = new Map(snapshot.entries.map((entry) => [entry.id, entry] as const));
-	return candidateIds.map((id) => byId.get(id)).filter((entry): entry is RawEntry => !!entry && isLabelableMapNode(entry));
+	return candidateIds.map((id) => byId.get(id)).filter((entry): entry is RawEntry => !!entry && isAutoLabelTargetEntry(entry));
 }
 
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -301,7 +310,7 @@ export async function startPersistentLabelsForEntryIds(
 	const targets = [...new Set(entryIds)]
 		.map((id) => byId.get(id))
 		.filter((entry): entry is RawEntry => !!entry)
-		.filter((entry) => isLabelableMapNode(entry))
+		.filter((entry) => isAutoLabelTargetEntry(entry))
 		.filter((entry) => !ctx.sessionManager.getLabel(entry.id));
 
 	if (targets.length === 0) {
