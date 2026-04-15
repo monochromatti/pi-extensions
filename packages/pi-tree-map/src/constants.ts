@@ -5,8 +5,6 @@ export const COMMAND_NAME = "map";
 export const LABEL_MODES: LabelMode[] = ["smart", "label", "id", "timestamp"];
 export const FILTER_MODES: FilterMode[] = ["all", "user-only", "labeled-only"];
 
-export const VIRTUAL_ROOT_ID = "__pi_tree_map_root__";
-
 export const NODE_W_DEFAULT = 1;
 export const NODE_H = 1;
 export const COL_GAP = 3;

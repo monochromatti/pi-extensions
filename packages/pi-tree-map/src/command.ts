@@ -120,7 +120,7 @@ export async function openTreeMap(pi: ExtensionAPI, ctx: ExtensionCommandContext
 			requestRender?.();
 			return;
 		}
-		const unlabeledIds = model.nodes.filter((node) => !node.isRoot && !node.isLabeled).map((node) => node.anchorEntryId);
+		const unlabeledIds = model.nodes.filter((node) => !node.isLabeled).map((node) => node.anchorEntryId);
 		if (unlabeledIds.length === 0) {
 			labelStatus = "Labels: ready";
 			requestRender?.();
@@ -195,7 +195,7 @@ export async function openTreeMap(pi: ExtensionAPI, ctx: ExtensionCommandContext
 
 		if (!result || result.action !== "jump" || !result.targetId) return;
 		const targetNode = model.nodes.find((node) => node.nodeId === result.targetId);
-		if (!targetNode || targetNode.isRoot) continue;
+		if (!targetNode) continue;
 
 		const options = await promptSummarizeOptions(ctx, {
 			title: targetNode.title,

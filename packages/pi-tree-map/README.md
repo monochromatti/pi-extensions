@@ -17,7 +17,7 @@ pi -e /Users/monochromatti/code/pi-extensions/packages/pi-tree-map
 ## Controls
 
 - `↑↓←→` move selection
-- `Enter` jump to selected branch
+- `Enter` jump to selected node/branch
 - `L` cycle title display mode
 - `F` cycle filter mode
 - `A` toggle auto-labeling for unlabeled map nodes

@@ -21,7 +21,6 @@ export interface MapNode {
 	anchorEntryId: string;
 	parentNodeId: string | null;
 	childNodeIds: string[];
-	isRoot: boolean;
 	isLeaf: boolean;
 	isBranchPoint: boolean;
 	isCurrent: boolean;

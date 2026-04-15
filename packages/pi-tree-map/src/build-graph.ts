@@ -1,4 +1,3 @@
-import { VIRTUAL_ROOT_ID } from "./constants.js";
 import { getTitle, summarizeEdge } from "./format.js";
 import { analyzeTreeMapSnapshot } from "./graph-core.js";
 import type { BuildGraphOptions, MapEdge, MapNode, RawEntry, Snapshot, TreeMapModel } from "./model.js";
@@ -66,17 +65,12 @@ function extractNodeMessage(entry: RawEntry): { text?: string; role?: string } {
 	return extractMessageDetails(entry);
 }
 
-function collectSegmentEntries(
-	childId: string,
-	parentId: string,
-	parentById: Map<string, string | null>,
-	visibleEntries: Map<string, RawEntry>,
-): RawEntry[] {
+function collectSegmentEntries(childId: string, parentId: string | null, parentById: Map<string, string | null>, visibleEntries: Map<string, RawEntry>): RawEntry[] {
 	const reversed: RawEntry[] = [];
 	let cur: string | null = childId;
 	while (cur && cur !== parentId) {
 		const entry = visibleEntries.get(cur);
-		if (entry && cur !== VIRTUAL_ROOT_ID) reversed.push(entry);
+		if (entry) reversed.push(entry);
 		cur = parentById.get(cur) ?? null;
 	}
 	reversed.reverse();
@@ -99,17 +93,13 @@ export function buildTreeMapModel(snapshot: Snapshot, options: BuildGraphOptions
 	}
 
 	const structuralParentById = new Map<string, string | null>();
-	structuralParentById.set(VIRTUAL_ROOT_ID, null);
 	for (const id of analysis.structural) {
-		if (id === VIRTUAL_ROOT_ID) continue;
-		const parent = nearestStructuralAncestor(id, analysis.parentById, analysis.structural) ?? VIRTUAL_ROOT_ID;
-		structuralParentById.set(id, parent);
+		structuralParentById.set(id, nearestStructuralAncestor(id, analysis.parentById, analysis.structural));
 	}
 
 	const edges: MapEdge[] = [];
 	for (const id of analysis.structural) {
-		if (id === VIRTUAL_ROOT_ID) continue;
-		const parentId = structuralParentById.get(id) ?? VIRTUAL_ROOT_ID;
+		const parentId = structuralParentById.get(id) ?? null;
 		const segmentEntries = collectSegmentEntries(id, parentId, analysis.parentById, analysis.visibleEntries);
 		const agg = initAgg();
 		let firstMessageText: string | undefined;
@@ -122,19 +112,21 @@ export function buildTreeMapModel(snapshot: Snapshot, options: BuildGraphOptions
 				firstMessageRole = details.role;
 			}
 		}
-		edges.push({
-			fromNodeId: parentId,
-			toNodeId: id,
-			entryCount: agg.entryCount,
-			messageCount: agg.messageCount,
-			userCount: agg.userCount,
-			assistantCount: agg.assistantCount,
-			toolCount: agg.toolCount,
-			tokenCount: agg.tokenCount || undefined,
-			firstMessageText,
-			firstMessageRole,
-			label: `${agg.messageCount} msg${agg.messageCount === 1 ? "" : "s"}`,
-		});
+		if (parentId) {
+			edges.push({
+				fromNodeId: parentId,
+				toNodeId: id,
+				entryCount: agg.entryCount,
+				messageCount: agg.messageCount,
+				userCount: agg.userCount,
+				assistantCount: agg.assistantCount,
+				toolCount: agg.toolCount,
+				tokenCount: agg.tokenCount || undefined,
+				firstMessageText,
+				firstMessageRole,
+				label: `${agg.messageCount} msg${agg.messageCount === 1 ? "" : "s"}`,
+			});
+		}
 	}
 
 	const incoming = new Map<string, MapEdge>();
@@ -149,21 +141,20 @@ export function buildTreeMapModel(snapshot: Snapshot, options: BuildGraphOptions
 	for (const id of analysis.structural) {
 		const entry = analysis.visibleEntries.get(id)!;
 		const label = snapshot.labelById[id];
-		const parentNodeId = id === VIRTUAL_ROOT_ID ? null : (structuralParentById.get(id) ?? null);
+		const parentNodeId = structuralParentById.get(id) ?? null;
 		const childNodeIds = childNodeIdsByParent.get(id) || [];
-		const nodeMessage = id === VIRTUAL_ROOT_ID ? {} : extractNodeMessage(entry);
+		const nodeMessage = extractNodeMessage(entry);
 		const node: MapNode = {
 			nodeId: id,
 			anchorEntryId: id,
 			parentNodeId,
 			childNodeIds,
-			isRoot: id === VIRTUAL_ROOT_ID,
 			isLeaf: childNodeIds.length === 0,
 			isBranchPoint: childNodeIds.length > 1,
 			isCurrent: !!currentNodeId && id === currentNodeId,
 			isLabeled: !!label,
-			title: id === VIRTUAL_ROOT_ID ? "ROOT" : getTitle(entry, label, options.labelMode),
-			subtitle: id === VIRTUAL_ROOT_ID ? `${analysis.rawRoots.length} root${analysis.rawRoots.length === 1 ? "" : "s"}` : "",
+			title: getTitle(entry, label, options.labelMode),
+			subtitle: "",
 			messageText: nodeMessage.text,
 			messageRole: nodeMessage.role,
 			depth: 0,
@@ -179,21 +170,15 @@ export function buildTreeMapModel(snapshot: Snapshot, options: BuildGraphOptions
 		nodes.push(node);
 	}
 
-	const strippedNodes = nodes.filter((node) => node.nodeId !== VIRTUAL_ROOT_ID);
-	for (const node of strippedNodes) {
-		if (node.parentNodeId === VIRTUAL_ROOT_ID) node.parentNodeId = null;
-		node.isRoot = node.parentNodeId === null;
-	}
-	const strippedEdges = edges.filter((edge) => edge.fromNodeId !== VIRTUAL_ROOT_ID && edge.toNodeId !== VIRTUAL_ROOT_ID);
 	const rootNodeId =
-		strippedNodes.find((node) => node.parentNodeId === null)?.nodeId ||
-		(currentNodeId && strippedNodes.some((node) => node.nodeId === currentNodeId) ? currentNodeId : undefined) ||
-		strippedNodes[0]?.nodeId ||
+		nodes.find((node) => node.parentNodeId === null)?.nodeId ||
+		(currentNodeId && nodes.some((node) => node.nodeId === currentNodeId) ? currentNodeId : undefined) ||
+		nodes[0]?.nodeId ||
 		"";
 
 	return {
-		nodes: strippedNodes,
-		edges: strippedEdges,
+		nodes,
+		edges,
 		rootNodeId,
 		currentNodeId,
 	};

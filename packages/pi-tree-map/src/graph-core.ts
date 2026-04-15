@@ -1,4 +1,3 @@
-import { VIRTUAL_ROOT_ID } from "./constants.js";
 import type { FilterMode, RawEntry, Snapshot } from "./model.js";
 
 export const BOOKKEEPING_ENTRY_TYPES = new Set([
@@ -131,37 +130,24 @@ export function analyzeTreeMapSnapshot(snapshot: Snapshot, filterMode: FilterMod
 
 	const parentById = new Map<string, string | null>();
 	const childrenById = new Map<string, string[]>();
-	childrenById.set(VIRTUAL_ROOT_ID, []);
-
 	for (const id of visible) {
-		if (id === VIRTUAL_ROOT_ID) continue;
 		childrenById.set(id, []);
 	}
 
 	for (const id of visible) {
-		if (id === VIRTUAL_ROOT_ID) continue;
-		const parent = nearestVisibleAncestor(id, parentRaw, visible) ?? VIRTUAL_ROOT_ID;
+		const parent = nearestVisibleAncestor(id, parentRaw, visible);
 		parentById.set(id, parent);
-		if (!childrenById.has(parent)) childrenById.set(parent, []);
-		childrenById.get(parent)?.push(id);
+		if (parent) childrenById.get(parent)?.push(id);
 	}
-	parentById.set(VIRTUAL_ROOT_ID, null);
 
 	const visibleEntries = new Map<string, RawEntry>();
-	visibleEntries.set(VIRTUAL_ROOT_ID, {
-		id: VIRTUAL_ROOT_ID,
-		parentId: null,
-		type: "root",
-		timestamp: new Date().toISOString(),
-	});
 	for (const id of visible) {
 		const entry = byId.get(id);
 		if (entry) visibleEntries.set(id, entry);
 	}
 
-	const structural = new Set<string>([VIRTUAL_ROOT_ID]);
+	const structural = new Set<string>();
 	for (const [id, entry] of visibleEntries) {
-		if (id === VIRTUAL_ROOT_ID) continue;
 		if (isTreeMapNodeEntry(entry)) structural.add(id);
 	}
 
