@@ -58,100 +58,100 @@ function extractMessageDetails(entry: RawEntry): { text?: string; role?: string 
 	return { text: text || undefined, role: entry.message?.role };
 }
 
+function extractNodeMessage(entry: RawEntry): { text?: string; role?: string } {
+	if (entry.type === "branch_summary") {
+		const text = entry.summary?.trim();
+		return { text: text || undefined, role: "branch_summary" };
+	}
+	return extractMessageDetails(entry);
+}
+
+function collectSegmentEntries(
+	childId: string,
+	parentId: string,
+	parentById: Map<string, string | null>,
+	visibleEntries: Map<string, RawEntry>,
+): RawEntry[] {
+	const reversed: RawEntry[] = [];
+	let cur: string | null = childId;
+	while (cur && cur !== parentId) {
+		const entry = visibleEntries.get(cur);
+		if (entry && cur !== VIRTUAL_ROOT_ID) reversed.push(entry);
+		cur = parentById.get(cur) ?? null;
+	}
+	reversed.reverse();
+	return reversed;
+}
+
 export function buildTreeMapModel(snapshot: Snapshot, options: BuildGraphOptions): TreeMapModel {
 	if (snapshot.entries.length === 0) {
-		const rootNode: MapNode = {
-			nodeId: VIRTUAL_ROOT_ID,
-			anchorEntryId: VIRTUAL_ROOT_ID,
-			parentNodeId: null,
-			childNodeIds: [],
-			isRoot: true,
-			isLeaf: true,
-			isBranchPoint: false,
-			isCurrent: false,
-			isLabeled: false,
-			title: "ROOT",
-			subtitle: "No session history yet.",
-			depth: 0,
-			x: 0,
-			y: 0,
-			w: 0,
-			h: 0,
-		};
-		return { nodes: [rootNode], edges: [], rootNodeId: VIRTUAL_ROOT_ID };
+		return { nodes: [], edges: [], rootNodeId: "" };
 	}
 
 	const analysis = analyzeTreeMapSnapshot(snapshot, options.filterMode);
 	if (analysis.entries.length === 0) {
-		const rootNode: MapNode = {
-			nodeId: VIRTUAL_ROOT_ID,
-			anchorEntryId: VIRTUAL_ROOT_ID,
-			parentNodeId: null,
-			childNodeIds: [],
-			isRoot: true,
-			isLeaf: true,
-			isBranchPoint: false,
-			isCurrent: false,
-			isLabeled: false,
-			title: "ROOT",
-			subtitle: "No map relevant history yet.",
-			depth: 0,
-			x: 0,
-			y: 0,
-			w: 0,
-			h: 0,
-		};
-		return { nodes: [rootNode], edges: [], rootNodeId: VIRTUAL_ROOT_ID };
+		return { nodes: [], edges: [], rootNodeId: "" };
+	}
+
+	let currentNodeId = analysis.currentLeaf;
+	while (currentNodeId && !analysis.structural.has(currentNodeId)) {
+		currentNodeId = analysis.parentById.get(currentNodeId) || undefined;
+	}
+
+	const structuralParentById = new Map<string, string | null>();
+	structuralParentById.set(VIRTUAL_ROOT_ID, null);
+	for (const id of analysis.structural) {
+		if (id === VIRTUAL_ROOT_ID) continue;
+		const parent = nearestStructuralAncestor(id, analysis.parentById, analysis.structural) ?? VIRTUAL_ROOT_ID;
+		structuralParentById.set(id, parent);
 	}
 
 	const edges: MapEdge[] = [];
-	for (const fromId of analysis.structural) {
-		for (const firstChild of analysis.childrenById.get(fromId) || []) {
-			let cur: string | undefined = firstChild;
-			const agg = initAgg();
-			let firstMessageText: string | undefined;
-			let firstMessageRole: string | undefined;
-			while (cur) {
-				const entry = analysis.visibleEntries.get(cur);
-				if (entry && cur !== VIRTUAL_ROOT_ID) {
-					updateAgg(agg, entry);
-					if (!firstMessageText) {
-						const details = extractMessageDetails(entry);
-						firstMessageText = details.text;
-						firstMessageRole = details.role;
-					}
-				}
-				if (analysis.structural.has(cur)) {
-					edges.push({
-						fromNodeId: fromId,
-						toNodeId: cur,
-						entryCount: agg.entryCount,
-						messageCount: agg.messageCount,
-						userCount: agg.userCount,
-						assistantCount: agg.assistantCount,
-						toolCount: agg.toolCount,
-						tokenCount: agg.tokenCount || undefined,
-						firstMessageText,
-						firstMessageRole,
-						label: `${agg.messageCount} msg${agg.messageCount === 1 ? "" : "s"}`,
-					});
-					break;
-				}
-				const children = analysis.childrenById.get(cur) || [];
-				cur = children[0];
+	for (const id of analysis.structural) {
+		if (id === VIRTUAL_ROOT_ID) continue;
+		const parentId = structuralParentById.get(id) ?? VIRTUAL_ROOT_ID;
+		const segmentEntries = collectSegmentEntries(id, parentId, analysis.parentById, analysis.visibleEntries);
+		const agg = initAgg();
+		let firstMessageText: string | undefined;
+		let firstMessageRole: string | undefined;
+		for (const entry of segmentEntries) {
+			updateAgg(agg, entry);
+			if (!firstMessageText) {
+				const details = extractMessageDetails(entry);
+				firstMessageText = details.text;
+				firstMessageRole = details.role;
 			}
 		}
+		edges.push({
+			fromNodeId: parentId,
+			toNodeId: id,
+			entryCount: agg.entryCount,
+			messageCount: agg.messageCount,
+			userCount: agg.userCount,
+			assistantCount: agg.assistantCount,
+			toolCount: agg.toolCount,
+			tokenCount: agg.tokenCount || undefined,
+			firstMessageText,
+			firstMessageRole,
+			label: `${agg.messageCount} msg${agg.messageCount === 1 ? "" : "s"}`,
+		});
 	}
 
 	const incoming = new Map<string, MapEdge>();
-	for (const edge of edges) incoming.set(edge.toNodeId, edge);
+	const childNodeIdsByParent = new Map<string, string[]>();
+	for (const edge of edges) {
+		incoming.set(edge.toNodeId, edge);
+		if (!childNodeIdsByParent.has(edge.fromNodeId)) childNodeIdsByParent.set(edge.fromNodeId, []);
+		childNodeIdsByParent.get(edge.fromNodeId)!.push(edge.toNodeId);
+	}
 
 	const nodes: MapNode[] = [];
 	for (const id of analysis.structural) {
 		const entry = analysis.visibleEntries.get(id)!;
 		const label = snapshot.labelById[id];
-		const parentNodeId = id === VIRTUAL_ROOT_ID ? null : nearestStructuralAncestor(id, analysis.parentById, analysis.structural);
-		const childNodeIds = edges.filter((edge) => edge.fromNodeId === id).map((edge) => edge.toNodeId);
+		const parentNodeId = id === VIRTUAL_ROOT_ID ? null : (structuralParentById.get(id) ?? null);
+		const childNodeIds = childNodeIdsByParent.get(id) || [];
+		const nodeMessage = id === VIRTUAL_ROOT_ID ? {} : extractNodeMessage(entry);
 		const node: MapNode = {
 			nodeId: id,
 			anchorEntryId: id,
@@ -160,12 +160,12 @@ export function buildTreeMapModel(snapshot: Snapshot, options: BuildGraphOptions
 			isRoot: id === VIRTUAL_ROOT_ID,
 			isLeaf: childNodeIds.length === 0,
 			isBranchPoint: childNodeIds.length > 1,
-			isCurrent: !!analysis.currentLeaf && id === analysis.currentLeaf,
+			isCurrent: !!currentNodeId && id === currentNodeId,
 			isLabeled: !!label,
 			title: id === VIRTUAL_ROOT_ID ? "ROOT" : getTitle(entry, label, options.labelMode),
 			subtitle: id === VIRTUAL_ROOT_ID ? `${analysis.rawRoots.length} root${analysis.rawRoots.length === 1 ? "" : "s"}` : "",
-			firstBranchMessage: undefined,
-			firstBranchMessageRole: undefined,
+			messageText: nodeMessage.text,
+			messageRole: nodeMessage.role,
 			depth: 0,
 			x: 0,
 			y: 0,
@@ -175,36 +175,26 @@ export function buildTreeMapModel(snapshot: Snapshot, options: BuildGraphOptions
 		const edge = incoming.get(id);
 		if (edge) {
 			node.subtitle = summarizeEdge(edge);
-			node.firstBranchMessage = edge.firstMessageText;
-			node.firstBranchMessageRole = edge.firstMessageRole;
 		}
 		nodes.push(node);
 	}
 
-	let currentNodeId = analysis.currentLeaf;
-	while (currentNodeId && !analysis.structural.has(currentNodeId)) {
-		currentNodeId = analysis.parentById.get(currentNodeId) || undefined;
+	const strippedNodes = nodes.filter((node) => node.nodeId !== VIRTUAL_ROOT_ID);
+	for (const node of strippedNodes) {
+		if (node.parentNodeId === VIRTUAL_ROOT_ID) node.parentNodeId = null;
+		node.isRoot = node.parentNodeId === null;
 	}
-
-	const virtualRoot = nodes.find((node) => node.nodeId === VIRTUAL_ROOT_ID);
-	if (virtualRoot && virtualRoot.childNodeIds.length === 1) {
-		const realRootId = virtualRoot.childNodeIds[0]!;
-		const realRoot = nodes.find((node) => node.nodeId === realRootId);
-		if (realRoot) {
-			realRoot.parentNodeId = null;
-			return {
-				nodes: nodes.filter((node) => node.nodeId !== VIRTUAL_ROOT_ID),
-				edges: edges.filter((edge) => edge.fromNodeId !== VIRTUAL_ROOT_ID && edge.toNodeId !== VIRTUAL_ROOT_ID),
-				rootNodeId: realRootId,
-				currentNodeId,
-			};
-		}
-	}
+	const strippedEdges = edges.filter((edge) => edge.fromNodeId !== VIRTUAL_ROOT_ID && edge.toNodeId !== VIRTUAL_ROOT_ID);
+	const rootNodeId =
+		strippedNodes.find((node) => node.parentNodeId === null)?.nodeId ||
+		(currentNodeId && strippedNodes.some((node) => node.nodeId === currentNodeId) ? currentNodeId : undefined) ||
+		strippedNodes[0]?.nodeId ||
+		"";
 
 	return {
-		nodes,
-		edges,
-		rootNodeId: VIRTUAL_ROOT_ID,
+		nodes: strippedNodes,
+		edges: strippedEdges,
+		rootNodeId,
 		currentNodeId,
 	};
 }

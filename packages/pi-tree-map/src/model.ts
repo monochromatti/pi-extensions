@@ -28,8 +28,8 @@ export interface MapNode {
 	isLabeled: boolean;
 	title: string;
 	subtitle: string;
-	firstBranchMessage?: string;
-	firstBranchMessageRole?: string;
+	messageText?: string;
+	messageRole?: string;
 	depth: number;
 	x: number;
 	y: number;

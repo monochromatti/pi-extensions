@@ -95,6 +95,7 @@ export class TreeMapComponent {
 		}
 
 		if (matchesKey(data, "return") || matchesKey(data, "enter")) {
+			if (!model.nodes.some((node) => node.nodeId === selected)) return;
 			void this.withBusy(async () => {
 				await this.opts.onEnter(selected);
 			});

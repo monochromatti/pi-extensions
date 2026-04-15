@@ -98,7 +98,7 @@ function drawV(canvas: string[][], x: number, y1: number, y2: number): void {
 }
 
 function getConnectorY(node: MapNode): number {
-	return node.y + 1;
+	return node.y + Math.floor(node.h / 2);
 }
 
 function drawEdgeGroup(canvas: string[][], parent: MapNode, children: MapNode[]): void {
@@ -132,29 +132,13 @@ function drawEdgeGroup(canvas: string[][], parent: MapNode, children: MapNode[])
 }
 
 function drawNode(canvas: string[][], node: MapNode): void {
-	const x = node.x;
-	const y = node.y;
-	const w = node.w;
-	const marker = node.isCurrent ? "◆" : "●";
-
-	putLine(canvas, x, y, DIR_RIGHT | DIR_DOWN);
-	putLine(canvas, x + w - 1, y, DIR_LEFT | DIR_DOWN);
-	putLine(canvas, x, y + NODE_H - 1, DIR_UP | DIR_RIGHT);
-	putLine(canvas, x + w - 1, y + NODE_H - 1, DIR_UP | DIR_LEFT);
-	drawH(canvas, x + 1, x + w - 2, y);
-	drawH(canvas, x + 1, x + w - 2, y + NODE_H - 1);
-	drawV(canvas, x, y + 1, y + NODE_H - 2);
-	drawV(canvas, x + w - 1, y + 1, y + NODE_H - 2);
-	text(canvas, x + 1, y + 1, " ".repeat(Math.max(0, w - 2)));
-	text(canvas, x + 1, y + 2, " ".repeat(Math.max(0, w - 2)));
-
-	text(canvas, x + 1, y + 1, `${marker} ${truncate(node.title, Math.max(0, w - 5))}`);
-	text(canvas, x + 1, y + 2, truncate(node.subtitle, Math.max(0, w - 3)));
+	put(canvas, node.x, node.y, "■");
 }
 
 const RESET_STYLE = "\x1b[0m";
 
 interface TreeMapStyles {
+	currentNodeStyle: string;
 	selectedNodeStyle: string;
 	userRoleStyle: string;
 	assistantRoleStyle: string;
@@ -163,6 +147,7 @@ interface TreeMapStyles {
 
 function getTreeMapStyles(theme: Theme): TreeMapStyles {
 	return {
+		currentNodeStyle: `${theme.getFgAnsi("success")}\x1b[1m`,
 		selectedNodeStyle: `${theme.getFgAnsi("borderAccent")}\x1b[1m`,
 		userRoleStyle: theme.getFgAnsi("accent"),
 		assistantRoleStyle: theme.getFgAnsi("success"),
@@ -172,7 +157,7 @@ function getTreeMapStyles(theme: Theme): TreeMapStyles {
 
 export function getTreeMapThemeSignature(theme: Theme): string {
 	const styles = getTreeMapStyles(theme);
-	return [styles.selectedNodeStyle, styles.userRoleStyle, styles.assistantRoleStyle, styles.messageRoleStyle].join("|");
+	return [styles.currentNodeStyle, styles.selectedNodeStyle, styles.userRoleStyle, styles.assistantRoleStyle, styles.messageRoleStyle].join("|");
 }
 
 function colorizeNonSpaceRange(line: string, start: number, endExclusive: number, style: string): string {
@@ -278,11 +263,22 @@ function buildSelectedModalLines(selected: MapNode, viewportWidth: number, maxHe
 	const modalWidth = clamp(Math.floor(viewportWidth * 0.72), 42, Math.max(42, viewportWidth - 2));
 	const contentWidth = Math.max(12, modalWidth - 4);
 	const titleLines = wrapText(selected.title.replace(/\s+/g, " "), contentWidth, 2);
-	const firstMessage = (selected.firstBranchMessage || "(No message found in this branch segment)").replace(/\s+/g, " ");
-	const role = selected.firstBranchMessageRole === "assistant" ? "assistant" : selected.firstBranchMessageRole === "user" ? "user" : "message";
+	const firstMessage = (selected.messageText || "(No message content available)").replace(/\s+/g, " ");
+	const role =
+		selected.messageRole === "assistant"
+			? "assistant"
+			: selected.messageRole === "user"
+				? "user"
+				: selected.messageRole === "branch_summary"
+					? "branch_summary"
+					: "message";
 	const styles = getTreeMapStyles(theme);
 	const roleColor =
-		role === "user" ? styles.userRoleStyle : role === "assistant" ? styles.assistantRoleStyle : styles.messageRoleStyle;
+		role === "user"
+			? styles.userRoleStyle
+			: role === "assistant"
+				? styles.assistantRoleStyle
+				: styles.messageRoleStyle;
 	const reset = RESET_STYLE;
 
 	const bodyCapacity = Math.max(4, maxHeight - 2);
@@ -364,6 +360,7 @@ export function renderTreeMap(
 	const drawNodes = model.nodes.map((n) => ({ ...n, x: n.x + renderOffsetX, y: n.y + renderOffsetY }));
 	const drawNodeById = new Map(drawNodes.map((n) => [n.nodeId, n]));
 	const selectedDrawNode = selected ? drawNodeById.get(selectedNodeId) : undefined;
+	const currentDrawNode = drawNodes.find((node) => node.isCurrent);
 
 	const maxX = drawNodes.reduce((m, n) => Math.max(m, n.x + n.w + 4), 0);
 	const maxY = drawNodes.reduce((m, n) => Math.max(m, n.y + n.h + 2), 0);
@@ -401,7 +398,17 @@ export function renderTreeMap(
 			const worldCol = col + camera.cameraX;
 			line += worldCol >= 0 && worldCol < source.length ? source[worldCol] : " ";
 		}
-		if (selectedDrawNode && worldRow >= selectedDrawNode.y && worldRow < selectedDrawNode.y + selectedDrawNode.h) {
+		if (currentDrawNode && worldRow >= currentDrawNode.y && worldRow < currentDrawNode.y + currentDrawNode.h) {
+			const start = currentDrawNode.x - camera.cameraX;
+			const endExclusive = currentDrawNode.x + currentDrawNode.w - camera.cameraX;
+			line = colorizeNonSpaceRange(line, start, endExclusive, styles.currentNodeStyle);
+		}
+		if (
+			selectedDrawNode &&
+			worldRow >= selectedDrawNode.y &&
+			worldRow < selectedDrawNode.y + selectedDrawNode.h &&
+			(!currentDrawNode || selectedDrawNode.nodeId !== currentDrawNode.nodeId)
+		) {
 			const start = selectedDrawNode.x - camera.cameraX;
 			const endExclusive = selectedDrawNode.x + selectedDrawNode.w - camera.cameraX;
 			line = colorizeNonSpaceRange(line, start, endExclusive, styles.selectedNodeStyle);

@@ -98,12 +98,12 @@ export async function openTreeMap(pi: ExtensionAPI, ctx: ExtensionCommandContext
 	let model = layoutTree(buildTreeMapModel(snapshot, { labelMode, filterMode }), process.stdout.columns || 120);
 	let component: TreeMapComponent | undefined;
 	let requestRender: (() => void) | undefined;
-	selectedNodeId = model.currentNodeId || model.rootNodeId;
+	selectedNodeId = model.currentNodeId || model.rootNodeId || model.nodes[0]?.nodeId || "";
 
 	const rebuildBase = (): void => {
 		model = layoutTree(buildTreeMapModel(snapshot, { labelMode, filterMode }), process.stdout.columns || 120);
 		if (!model.nodes.some((node) => node.nodeId === selectedNodeId)) {
-			selectedNodeId = model.currentNodeId || model.rootNodeId;
+			selectedNodeId = model.currentNodeId || model.rootNodeId || model.nodes[0]?.nodeId || "";
 		}
 	};
 

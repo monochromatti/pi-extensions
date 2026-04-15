@@ -13,6 +13,13 @@ export function isMapRelevantEntry(entry: RawEntry): boolean {
 	return !BOOKKEEPING_ENTRY_TYPES.has(entry.type);
 }
 
+export function isTreeMapNodeEntry(entry: RawEntry): boolean {
+	if (entry.type === "branch_summary") return true;
+	if (entry.type !== "message") return false;
+	const role = entry.message?.role;
+	return role === "user";
+}
+
 function nearestRelevantSelfOrAncestor(
 	id: string,
 	parentRaw: Map<string, string | null>,
@@ -152,20 +159,10 @@ export function analyzeTreeMapSnapshot(snapshot: Snapshot, filterMode: FilterMod
 		if (entry) visibleEntries.set(id, entry);
 	}
 
-	const structural = new Set<string>();
-	for (const [id] of visibleEntries) {
-		const childCount = (childrenById.get(id) || []).length;
-		const isRoot = id === VIRTUAL_ROOT_ID;
-		const isLeaf = childCount === 0;
-		const isBranch = childCount > 1;
-		if (isRoot || isLeaf || isBranch || (currentLeaf && id === currentLeaf)) {
-			structural.add(id);
-		}
-	}
-
-	const realStructuralNodeIds = [...structural].filter((id) => id !== VIRTUAL_ROOT_ID);
-	if (rawRoots.length === 1 && currentLeaf && currentLeaf !== rawRoots[0] && realStructuralNodeIds.length === 1) {
-		structural.add(rawRoots[0]!);
+	const structural = new Set<string>([VIRTUAL_ROOT_ID]);
+	for (const [id, entry] of visibleEntries) {
+		if (id === VIRTUAL_ROOT_ID) continue;
+		if (isTreeMapNodeEntry(entry)) structural.add(id);
 	}
 
 	return {

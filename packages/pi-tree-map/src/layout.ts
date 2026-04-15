@@ -2,14 +2,13 @@ import { COL_GAP, NODE_H, NODE_W_DEFAULT, ROW_GAP } from "./constants.js";
 import type { TreeMapModel } from "./model.js";
 
 function clampNodeWidth(viewWidth: number): number {
-	if (!viewWidth || viewWidth < 80) return 20;
-	return Math.max(20, Math.min(NODE_W_DEFAULT, Math.floor(viewWidth * 0.35)));
+	void viewWidth;
+	return NODE_W_DEFAULT;
 }
 
 export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapModel {
 	const nodeById = new Map(model.nodes.map((n) => [n.nodeId, n]));
-	const root = nodeById.get(model.rootNodeId);
-	if (!root) return model;
+	if (model.nodes.length === 0) return model;
 
 	const nodeW = clampNodeWidth(viewportWidth);
 	const xStep = nodeW + COL_GAP;
@@ -44,8 +43,15 @@ export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapM
 		return node.y;
 	};
 
-	assignDepth(model.rootNodeId, 0);
-	assignY(model.rootNodeId);
+	const rootIds = model.nodes
+		.filter((node) => !node.parentNodeId || !nodeById.has(node.parentNodeId))
+		.map((node) => node.nodeId);
+	const orderedRootIds = rootIds.length > 0 ? rootIds : [model.rootNodeId].filter(Boolean);
+
+	for (const rootId of orderedRootIds) {
+		assignDepth(rootId, 0);
+		assignY(rootId);
+	}
 
 	// Simple collision pass per depth column
 	const byDepth = new Map<number, typeof model.nodes>();

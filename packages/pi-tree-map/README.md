@@ -2,6 +2,8 @@
 
 Pi extension that adds `/map`: an interactive terminal tree-map view of the current session graph.
 
+Nodes are compact squares (one per user message and branch summary), with details shown in the modal below the map.
+
 ## Load
 
 ```bash
