@@ -6,6 +6,7 @@ Collection of local Pi extensions.
 
 - `packages/pi-tree-map` — interactive session tree map (`/map`).
 - `packages/pi-answer` — interactive question extraction and answering (`/answer`).
+- `packages/pi-zed-context` — Zed active file/selection DB reader (`zed_context` tool, `/zed-context`, `zed-context` skill).
 
 ## Use locally
 

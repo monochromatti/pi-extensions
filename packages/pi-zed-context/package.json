@@ -1,0 +1,22 @@
+{
+  "name": "@monochromatti/pi-zed-context",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Pi extension tool for reading active file and selection from Zed's local DB",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "build": "echo 'nothing to build'",
+    "check": "echo 'no checks configured yet'"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.70.0"
+  }
+}
