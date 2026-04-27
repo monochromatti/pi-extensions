@@ -29,6 +29,12 @@ export interface MapNode {
 	subtitle: string;
 	messageText?: string;
 	messageRole?: string;
+	previousMessageText?: string;
+	previousMessageRole?: string;
+	nextMessageText?: string;
+	nextMessageRole?: string;
+	previousMessages?: Array<{ text?: string; role?: string }>;
+	nextMessages?: Array<{ text?: string; role?: string }>;
 	depth: number;
 	x: number;
 	y: number;

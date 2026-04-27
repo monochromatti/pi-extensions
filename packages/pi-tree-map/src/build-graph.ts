@@ -65,6 +65,22 @@ function extractNodeMessage(entry: RawEntry): { text?: string; role?: string } {
 	return extractMessageDetails(entry);
 }
 
+function isMessageLike(entry: RawEntry): boolean {
+	if (entry.type === "branch_summary") return true;
+	return entry.type === "message";
+}
+
+function findAdjacentMessages(entries: RawEntry[], index: number, direction: -1 | 1, limit: number): Array<{ text?: string; role?: string }> {
+	const messages: Array<{ text?: string; role?: string }> = [];
+	for (let i = index + direction; i >= 0 && i < entries.length && messages.length < limit; i += direction) {
+		const entry = entries[i]!;
+		if (!isMessageLike(entry)) continue;
+		const details = extractNodeMessage(entry);
+		if (details.text) messages.push(details);
+	}
+	return direction === -1 ? messages.reverse() : messages;
+}
+
 function collectSegmentEntries(childId: string, parentId: string | null, parentById: Map<string, string | null>, visibleEntries: Map<string, RawEntry>): RawEntry[] {
 	const reversed: RawEntry[] = [];
 	let cur: string | null = childId;
@@ -137,6 +153,9 @@ export function buildTreeMapModel(snapshot: Snapshot, options: BuildGraphOptions
 		childNodeIdsByParent.get(edge.fromNodeId)!.push(edge.toNodeId);
 	}
 
+	const entryIndexById = new Map<string, number>();
+	analysis.entries.forEach((entry, index) => entryIndexById.set(entry.id, index));
+
 	const nodes: MapNode[] = [];
 	for (const id of analysis.structural) {
 		const entry = analysis.visibleEntries.get(id)!;
@@ -144,6 +163,11 @@ export function buildTreeMapModel(snapshot: Snapshot, options: BuildGraphOptions
 		const parentNodeId = structuralParentById.get(id) ?? null;
 		const childNodeIds = childNodeIdsByParent.get(id) || [];
 		const nodeMessage = extractNodeMessage(entry);
+		const entryIndex = entryIndexById.get(id) ?? -1;
+		const previousMessages = entryIndex >= 0 ? findAdjacentMessages(analysis.entries, entryIndex, -1, 4) : [];
+		const nextMessages = entryIndex >= 0 ? findAdjacentMessages(analysis.entries, entryIndex, 1, 4) : [];
+		const previousMessage = previousMessages[previousMessages.length - 1] || {};
+		const nextMessage = nextMessages[0] || {};
 		const node: MapNode = {
 			nodeId: id,
 			anchorEntryId: id,
@@ -157,6 +181,12 @@ export function buildTreeMapModel(snapshot: Snapshot, options: BuildGraphOptions
 			subtitle: "",
 			messageText: nodeMessage.text,
 			messageRole: nodeMessage.role,
+			previousMessageText: previousMessage.text,
+			previousMessageRole: previousMessage.role,
+			nextMessageText: nextMessage.text,
+			nextMessageRole: nextMessage.role,
+			previousMessages,
+			nextMessages,
 			depth: 0,
 			x: 0,
 			y: 0,

@@ -207,6 +207,67 @@ function getBounds(nodes: MapNode[]): { minX: number; minY: number; maxX: number
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
+interface RgbColor {
+	r: number;
+	g: number;
+	b: number;
+}
+
+function xterm256ToRgb(index: number): RgbColor | undefined {
+	if (index < 0 || index > 255) return undefined;
+	const basic: RgbColor[] = [
+		{ r: 0, g: 0, b: 0 },
+		{ r: 128, g: 0, b: 0 },
+		{ r: 0, g: 128, b: 0 },
+		{ r: 128, g: 128, b: 0 },
+		{ r: 0, g: 0, b: 128 },
+		{ r: 128, g: 0, b: 128 },
+		{ r: 0, g: 128, b: 128 },
+		{ r: 192, g: 192, b: 192 },
+		{ r: 128, g: 128, b: 128 },
+		{ r: 255, g: 0, b: 0 },
+		{ r: 0, g: 255, b: 0 },
+		{ r: 255, g: 255, b: 0 },
+		{ r: 0, g: 0, b: 255 },
+		{ r: 255, g: 0, b: 255 },
+		{ r: 0, g: 255, b: 255 },
+		{ r: 255, g: 255, b: 255 },
+	];
+	if (index < basic.length) return basic[index];
+	if (index >= 232) {
+		const gray = 8 + (index - 232) * 10;
+		return { r: gray, g: gray, b: gray };
+	}
+	const cube = index - 16;
+	const values = [0, 95, 135, 175, 215, 255];
+	return {
+		r: values[Math.floor(cube / 36)]!,
+		g: values[Math.floor((cube % 36) / 6)]!,
+		b: values[cube % 6]!,
+	};
+}
+
+function rgbFromAnsi(style: string, kind: "fg" | "bg"): RgbColor | undefined {
+	const prefix = kind === "fg" ? "38" : "48";
+	const trueColor = new RegExp(`\\x1b\\[${prefix};2;(\\d+);(\\d+);(\\d+)m`).exec(style);
+	if (trueColor) return { r: Number(trueColor[1]), g: Number(trueColor[2]), b: Number(trueColor[3]) };
+	const indexed = new RegExp(`\\x1b\\[${prefix};5;(\\d+)m`).exec(style);
+	return indexed ? xterm256ToRgb(Number(indexed[1])) : undefined;
+}
+
+function rgbToFgAnsi(color: RgbColor): string {
+	return `\x1b[38;2;${color.r};${color.g};${color.b}m`;
+}
+
+function blendColor(foreground: RgbColor, background: RgbColor, alpha: number): RgbColor {
+	const clamped = clamp(alpha, 0, 1);
+	return {
+		r: Math.round(background.r + (foreground.r - background.r) * clamped),
+		g: Math.round(background.g + (foreground.g - background.g) * clamped),
+		b: Math.round(background.b + (foreground.b - background.b) * clamped),
+	};
+}
+
 function stripAnsi(text: string): string {
 	return text.replace(ANSI_RE, "");
 }
@@ -257,54 +318,82 @@ function wrapText(textValue: string, width: number, maxLines: number): string[] 
 	return lines;
 }
 
+function normalizeRole(role?: string): string {
+	return role === "assistant" || role === "user" || role === "branch_summary" ? role : "message";
+}
+
+function roleStyle(role: string, styles: TreeMapStyles): string {
+	return role === "user" ? styles.userRoleStyle : role === "assistant" ? styles.assistantRoleStyle : styles.messageRoleStyle;
+}
+
+function formatMessageBlock(roleValue: string | undefined, textValue: string | undefined, contentWidth: number, maxLines: number, style: string): string[] {
+	const role = normalizeRole(roleValue);
+	const message = (textValue || "(No message content available)").replace(/\s+/g, " ");
+	const prefixPlain = `${role}: `;
+	const firstWidth = Math.max(1, contentWidth - prefixPlain.length);
+	const reset = RESET_STYLE;
+	const wrapped = wrapText(message, contentWidth, maxLines);
+	const lines: string[] = [];
+	if (wrapped.length > 0) {
+		lines.push(`${style}${role}:${reset} ${style}${clipNoEllipsis(wrapped[0] || "", firstWidth)}${reset}`);
+		for (let i = 1; i < wrapped.length && lines.length < maxLines; i++) {
+			lines.push(`${style}${" ".repeat(prefixPlain.length)}${clipNoEllipsis(wrapped[i] || "", Math.max(1, contentWidth - prefixPlain.length))}${reset}`);
+		}
+	}
+	return lines;
+}
+
+function fadeStyle(baseStyle: string, distanceFromMain: number, theme: Theme): string {
+	if (distanceFromMain <= 0) return baseStyle;
+
+	const foreground = rgbFromAnsi(baseStyle, "fg") || rgbFromAnsi(theme.getFgAnsi("text"), "fg");
+	const background = rgbFromAnsi(theme.getBgAnsi("userMessageBg"), "bg") || { r: 0, g: 0, b: 0 };
+	if (!foreground) return `${baseStyle}\x1b[2m`;
+
+	const alpha = distanceFromMain === 1 ? 0.3 : distanceFromMain === 2 ? 0.17 : 0.08;
+	return rgbToFgAnsi(blendColor(foreground, background, alpha));
+}
+
 function buildSelectedModalLines(selected: MapNode, viewportWidth: number, maxHeight: number, theme: Theme): string[] {
-	if (viewportWidth < 36 || maxHeight < 6) return [];
+	if (viewportWidth < 36 || maxHeight < 8) return [];
 
 	const modalWidth = clamp(Math.floor(viewportWidth * 0.72), 42, Math.max(42, viewportWidth - 2));
 	const contentWidth = Math.max(12, modalWidth - 4);
-	const titleLines = wrapText(selected.title.replace(/\s+/g, " "), contentWidth, 2);
-	const firstMessage = (selected.messageText || "(No message content available)").replace(/\s+/g, " ");
-	const role =
-		selected.messageRole === "assistant"
-			? "assistant"
-			: selected.messageRole === "user"
-				? "user"
-				: selected.messageRole === "branch_summary"
-					? "branch_summary"
-					: "message";
 	const styles = getTreeMapStyles(theme);
-	const roleColor =
-		role === "user"
-			? styles.userRoleStyle
-			: role === "assistant"
-				? styles.assistantRoleStyle
-				: styles.messageRoleStyle;
-	const reset = RESET_STYLE;
+	const mainRole = normalizeRole(selected.messageRole);
+	const mainStyle = roleStyle(mainRole, styles);
 
-	const bodyCapacity = Math.max(4, maxHeight - 2);
-	const bodyLines: string[] = [];
-	for (const t of titleLines) bodyLines.push(clipNoEllipsis(t, contentWidth));
-	bodyLines.push("");
+	const bodyCapacity = Math.max(6, maxHeight - 2);
+	const contextSlots = Math.max(2, Math.floor((bodyCapacity - 2) / 2));
+	const previousMessages = (selected.previousMessages?.length ? selected.previousMessages : [{ role: selected.previousMessageRole, text: selected.previousMessageText || "(No preceding message)" }]).slice(-contextSlots);
+	const nextMessages = (selected.nextMessages?.length ? selected.nextMessages : [{ role: selected.nextMessageRole, text: selected.nextMessageText || "(No following message)" }]).slice(0, contextSlots);
 
-	const remaining = Math.max(1, bodyCapacity - bodyLines.length);
-	const prefixPlain = `${role}: `;
-	const firstWidth = Math.max(1, contentWidth - prefixPlain.length);
-	const wrapped = wrapText(firstMessage, contentWidth, remaining);
-	if (wrapped.length > 0) {
-		bodyLines.push(`${roleColor}${role}:${reset} ${clipNoEllipsis(wrapped[0] || "", firstWidth)}`);
-		for (let i = 1; i < wrapped.length && bodyLines.length < bodyCapacity; i++) {
-			bodyLines.push(`${" ".repeat(prefixPlain.length)}${clipNoEllipsis(wrapped[i] || "", Math.max(1, contentWidth - prefixPlain.length))}`);
-		}
-	}
+	const previousLines = previousMessages.flatMap((message, index) => {
+		const distance = previousMessages.length - index;
+		const baseStyle = roleStyle(normalizeRole(message.role), styles);
+		return formatMessageBlock(message.role, message.text, contentWidth, 1, fadeStyle(baseStyle, distance, theme));
+	});
+	const nextLines = nextMessages.flatMap((message, index) => {
+		const baseStyle = roleStyle(normalizeRole(message.role), styles);
+		return formatMessageBlock(message.role, message.text, contentWidth, 1, fadeStyle(baseStyle, index + 1, theme));
+	});
 
-	const clippedBody = bodyLines.slice(0, bodyCapacity);
+	const mainMaxLines = Math.max(1, bodyCapacity - Math.min(previousLines.length, contextSlots) - Math.min(nextLines.length, contextSlots));
+	const mainLines = formatMessageBlock(selected.messageRole, selected.messageText, contentWidth, mainMaxLines, mainStyle);
+
+	const bodyLines = Array.from({ length: bodyCapacity }, () => "");
+	const mainStart = clamp(Math.floor((bodyCapacity - mainLines.length) / 2), 0, Math.max(0, bodyCapacity - mainLines.length));
+	const prevStart = Math.max(0, mainStart - previousLines.length);
+	const visiblePrev = previousLines.slice(Math.max(0, previousLines.length - mainStart));
+	for (let i = 0; i < visiblePrev.length && prevStart + i < mainStart; i++) bodyLines[prevStart + i] = visiblePrev[i]!;
+	for (let i = 0; i < mainLines.length && mainStart + i < bodyCapacity; i++) bodyLines[mainStart + i] = mainLines[i]!;
+	const nextStart = mainStart + mainLines.length;
+	for (let i = 0; i < nextLines.length && nextStart + i < bodyCapacity; i++) bodyLines[nextStart + i] = nextLines[i]!;
+
 	const box: string[] = [];
 	box.push(`╭${"─".repeat(modalWidth - 2)}╮`);
-	for (const body of clippedBody) {
+	for (const body of bodyLines) {
 		box.push(`│ ${padAnsiRight(body, contentWidth)} │`);
-	}
-	while (box.length < Math.max(1, maxHeight - 1)) {
-		box.push(`│ ${" ".repeat(contentWidth)} │`);
 	}
 	box.push(`╰${"─".repeat(modalWidth - 2)}╯`);
 
@@ -328,7 +417,7 @@ export function renderTreeMap(
 
 	const footerHeight = 1;
 	const maxModalHeight = Math.max(0, safeHeight - footerHeight - 6);
-	const modalLines = selected ? buildSelectedModalLines(selected, viewportWidth, Math.min(9, maxModalHeight), theme) : [];
+	const modalLines = selected ? buildSelectedModalLines(selected, viewportWidth, Math.min(17, maxModalHeight), theme) : [];
 	const modalReserveExtra = modalLines.length > 0 ? 4 : 0;
 	const belowAreaTarget = modalLines.length + modalReserveExtra;
 	const mapHeight = Math.max(4, safeHeight - footerHeight - belowAreaTarget);
