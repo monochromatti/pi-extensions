@@ -13,10 +13,10 @@ interface TreeMapComponentOptions {
 	setSelectedNodeId: (id: string) => void;
 	getLabelMode: () => LabelMode;
 	getFilterMode: () => FilterMode;
-	onEnter: (nodeId: string) => Promise<void>;
+	onEnter: (nodeId: string) => void | Promise<void>;
 	onClose: () => void;
-	onCycleLabel: () => Promise<void>;
-	onCycleFilter: () => Promise<void>;
+	onCycleLabel: () => void | Promise<void>;
+	onCycleFilter: () => void | Promise<void>;
 }
 
 export class TreeMapComponent {
@@ -118,7 +118,7 @@ export class TreeMapComponent {
 		// no-op
 	}
 
-	private async withBusy(fn: () => Promise<void>): Promise<void> {
+	private async withBusy(fn: () => void | Promise<void>): Promise<void> {
 		this.busy = true;
 		this.invalidate();
 		this.opts.tui.requestRender();

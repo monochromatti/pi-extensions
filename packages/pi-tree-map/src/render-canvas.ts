@@ -1,6 +1,6 @@
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { FOOTER_TEXT, NODE_H } from "./constants.js";
-import { truncate } from "./format.js";
+import { compactWhitespace, truncate, visibleLength } from "./text.js";
 import type { MapNode, TreeMapModel } from "./model.js";
 
 export interface CameraState {
@@ -205,8 +205,6 @@ function getBounds(nodes: MapNode[]): { minX: number; minY: number; maxX: number
 	return { minX, minY, maxX, maxY };
 }
 
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
-
 interface RgbColor {
 	r: number;
 	g: number;
@@ -268,14 +266,6 @@ function blendColor(foreground: RgbColor, background: RgbColor, alpha: number): 
 	};
 }
 
-function stripAnsi(text: string): string {
-	return text.replace(ANSI_RE, "");
-}
-
-function visibleLength(text: string): number {
-	return stripAnsi(text).length;
-}
-
 function padAnsiRight(text: string, width: number): string {
 	const len = visibleLength(text);
 	if (len >= width) return text;
@@ -328,7 +318,7 @@ function roleStyle(role: string, styles: TreeMapStyles): string {
 
 function formatMessageBlock(roleValue: string | undefined, textValue: string | undefined, contentWidth: number, maxLines: number, style: string): string[] {
 	const role = normalizeRole(roleValue);
-	const message = (textValue || "(No message content available)").replace(/\s+/g, " ");
+	const message = compactWhitespace(textValue || "(No message content available)");
 	const prefixPlain = `${role}: `;
 	const firstWidth = Math.max(1, contentWidth - prefixPlain.length);
 	const reset = RESET_STYLE;

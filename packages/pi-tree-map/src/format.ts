@@ -1,19 +1,8 @@
 import type { LabelMode, MapEdge, RawEntry } from "./model.js";
-
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
-
-export function stripAnsi(text: string): string {
-	return text.replace(ANSI_RE, "");
-}
+import { compactWhitespace } from "./text.js";
 
 export function shortId(id: string): string {
 	return id.slice(0, 8);
-}
-
-export function truncate(text: string, max: number): string {
-	if (max <= 1) return "…";
-	if (text.length <= max) return text;
-	return `${text.slice(0, max - 1)}…`;
 }
 
 export function formatLocalTime(timestamp?: string): string {
@@ -31,7 +20,7 @@ export function getUserSnippet(entry: RawEntry): string | undefined {
 		.join("\n")
 		.trim();
 	if (!text) return undefined;
-	return text.replace(/\s+/g, " ");
+	return compactWhitespace(text);
 }
 
 export function getTitle(entry: RawEntry, label: string | undefined, mode: LabelMode): string {

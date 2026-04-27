@@ -1,21 +1,21 @@
 import { COL_GAP, NODE_H, NODE_W_DEFAULT, ROW_GAP } from "./constants.js";
 import type { TreeMapModel } from "./model.js";
 
-function clampNodeWidth(viewWidth: number): number {
-	void viewWidth;
+function getNodeWidth(_viewportWidth: number): number {
 	return NODE_W_DEFAULT;
 }
 
 export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapModel {
-	const nodeById = new Map(model.nodes.map((n) => [n.nodeId, n]));
 	if (model.nodes.length === 0) return model;
 
-	const nodeW = clampNodeWidth(viewportWidth);
+	const nodes = model.nodes.map((node) => ({ ...node }));
+	const nodeById = new Map(nodes.map((node) => [node.nodeId, node]));
+	const nodeW = getNodeWidth(viewportWidth);
 	const xStep = nodeW + COL_GAP;
 	const yStep = NODE_H + ROW_GAP;
 
 	const childrenById = new Map<string, string[]>();
-	for (const node of model.nodes) childrenById.set(node.nodeId, node.childNodeIds);
+	for (const node of nodes) childrenById.set(node.nodeId, node.childNodeIds);
 
 	const assignDepth = (id: string, depth: number): void => {
 		const node = nodeById.get(id);
@@ -43,7 +43,7 @@ export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapM
 		return node.y;
 	};
 
-	const rootIds = model.nodes
+	const rootIds = nodes
 		.filter((node) => !node.parentNodeId || !nodeById.has(node.parentNodeId))
 		.map((node) => node.nodeId);
 	const orderedRootIds = rootIds.length > 0 ? rootIds : [model.rootNodeId].filter(Boolean);
@@ -54,8 +54,8 @@ export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapM
 	}
 
 	// Simple collision pass per depth column
-	const byDepth = new Map<number, typeof model.nodes>();
-	for (const n of model.nodes) {
+	const byDepth = new Map<number, typeof nodes>();
+	for (const n of nodes) {
 		if (!byDepth.has(n.depth)) byDepth.set(n.depth, []);
 		byDepth.get(n.depth)!.push(n);
 	}
@@ -69,5 +69,5 @@ export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapM
 		}
 	}
 
-	return model;
+	return { ...model, nodes };
 }

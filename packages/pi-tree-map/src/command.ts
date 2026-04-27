@@ -16,9 +16,10 @@ interface NavigateTreeResult {
 	editorText?: string;
 }
 
-function nextMode<T extends string>(arr: T[], current: T): T {
-	const idx = arr.indexOf(current);
-	return arr[(idx + 1) % arr.length] || arr[0]!;
+function nextMode<T extends string>(modes: readonly T[], current: T): T {
+	const currentIndex = modes.indexOf(current);
+	const nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % modes.length;
+	return modes[nextIndex] ?? current;
 }
 
 function snapshotFromContext(ctx: ExtensionCommandContext): Snapshot {
