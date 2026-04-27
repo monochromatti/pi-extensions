@@ -1,5 +1,4 @@
-import { BorderedLoader, type ExtensionCommandContext, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { startPersistentLabelsForEntryIds, type PersistedLabelController } from "../../pi-auto-label/src/auto-label.js";
+import { BorderedLoader, type ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { buildTreeMapModel } from "./build-graph.js";
 import { FILTER_MODES, LABEL_MODES } from "./constants.js";
 import { layoutTree } from "./layout.js";
@@ -79,7 +78,7 @@ async function navigateTreeWithProgress(
 	return result || { cancelled: true };
 }
 
-export async function openTreeMap(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+export async function openTreeMap(ctx: ExtensionCommandContext): Promise<void> {
 	if (!ctx.hasUI) {
 		ctx.ui.notify("/map requires interactive mode", "warning");
 		return;
@@ -90,10 +89,6 @@ export async function openTreeMap(pi: ExtensionAPI, ctx: ExtensionCommandContext
 
 	let labelMode: LabelMode = "smart";
 	let filterMode: FilterMode = "all";
-	let autoLabelEnabled = true;
-	let labelStatus = "Labels: loading";
-	let labelController: PersistedLabelController | undefined;
-	let labelGeneration = 0;
 	let selectedNodeId = "";
 	let model = layoutTree(buildTreeMapModel(snapshot, { labelMode, filterMode }), process.stdout.columns || 120);
 	let component: TreeMapComponent | undefined;
@@ -107,48 +102,8 @@ export async function openTreeMap(pi: ExtensionAPI, ctx: ExtensionCommandContext
 		}
 	};
 
-	const stopLabeling = (): void => {
-		labelGeneration += 1;
-		labelController?.cancel();
-		labelController = undefined;
-	};
-
-	const startLabeling = async (): Promise<void> => {
-		stopLabeling();
-		if (!autoLabelEnabled) {
-			labelStatus = "Labels: off";
-			requestRender?.();
-			return;
-		}
-		const unlabeledIds = model.nodes.filter((node) => !node.isLabeled).map((node) => node.anchorEntryId);
-		if (unlabeledIds.length === 0) {
-			labelStatus = "Labels: ready";
-			requestRender?.();
-			return;
-		}
-
-		labelStatus = "Labels: loading";
-		requestRender?.();
-		const generation = labelGeneration;
-		labelController = await startPersistentLabelsForEntryIds(pi, ctx, unlabeledIds, {
-			onLabel: (entryId, label) => {
-				if (generation !== labelGeneration) return;
-				snapshot.labelById[entryId] = label;
-				rebuildBase();
-				component?.invalidate();
-				requestRender?.();
-			},
-			onStatus: (status) => {
-				if (generation !== labelGeneration) return;
-				labelStatus = status;
-				requestRender?.();
-			},
-		});
-	};
-
 	const rebuild = async (): Promise<void> => {
 		rebuildBase();
-		await startLabeling();
 		component?.invalidate();
 		requestRender?.();
 	};
@@ -169,7 +124,6 @@ export async function openTreeMap(pi: ExtensionAPI, ctx: ExtensionCommandContext
 				},
 				getLabelMode: () => labelMode,
 				getFilterMode: () => filterMode,
-				getLabelStatus: () => labelStatus,
 				onEnter: async (nodeId) => {
 					done({ action: "jump", targetId: nodeId });
 				},
@@ -182,16 +136,9 @@ export async function openTreeMap(pi: ExtensionAPI, ctx: ExtensionCommandContext
 					filterMode = nextMode(FILTER_MODES, filterMode);
 					await rebuild();
 				},
-				onToggleAutoLabel: async () => {
-					autoLabelEnabled = !autoLabelEnabled;
-					await rebuild();
-				},
 			});
-			void startLabeling();
 			return component;
 		});
-
-		stopLabeling();
 
 		if (!result || result.action !== "jump" || !result.targetId) return;
 		const targetNode = model.nodes.find((node) => node.nodeId === result.targetId);

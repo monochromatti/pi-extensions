@@ -10,4 +10,4 @@ export const NODE_H = 1;
 export const COL_GAP = 3;
 export const ROW_GAP = 1;
 
-export const FOOTER_TEXT = "↑↓←→ Move | Enter Jump | Esc Close | L Labels | F Filter | A Auto-label";
+export const FOOTER_TEXT = "↑↓←→ Move | Enter Jump | Esc Close | L Labels | F Filter";

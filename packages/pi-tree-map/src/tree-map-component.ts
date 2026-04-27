@@ -13,12 +13,10 @@ interface TreeMapComponentOptions {
 	setSelectedNodeId: (id: string) => void;
 	getLabelMode: () => LabelMode;
 	getFilterMode: () => FilterMode;
-	getLabelStatus: () => string;
 	onEnter: (nodeId: string) => Promise<void>;
 	onClose: () => void;
 	onCycleLabel: () => Promise<void>;
 	onCycleFilter: () => Promise<void>;
-	onToggleAutoLabel: () => Promise<void>;
 }
 
 export class TreeMapComponent {
@@ -56,9 +54,7 @@ export class TreeMapComponent {
 		}
 		const model = this.opts.getModel();
 		const selectedId = this.opts.getSelectedNodeId();
-		const status = this.busy
-			? "Working..."
-			: `${FOOTER_TEXT} | Mode:${this.opts.getLabelMode()} | Filter:${this.opts.getFilterMode()} | ${this.opts.getLabelStatus()}`;
+		const status = this.busy ? "Working..." : `${FOOTER_TEXT} | Mode:${this.opts.getLabelMode()} | Filter:${this.opts.getFilterMode()}`;
 		this.cached = renderTreeMap(model, selectedId, this.camera, width, height, status, theme);
 		this.cacheWidth = width;
 		this.cacheHeight = height;
@@ -115,13 +111,6 @@ export class TreeMapComponent {
 				this.invalidate();
 			});
 			return;
-		}
-
-		if (data === "a" || data === "A") {
-			void this.withBusy(async () => {
-				await this.opts.onToggleAutoLabel();
-				this.invalidate();
-			});
 		}
 	}
 
