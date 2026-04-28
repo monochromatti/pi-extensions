@@ -1,5 +1,5 @@
 import type { Theme } from "@mariozechner/pi-coding-agent";
-import { FOOTER_TEXT, NODE_H } from "./constants.js";
+import { FOOTER_TEXT } from "./constants.js";
 import { compactWhitespace, truncate, visibleLength } from "./text.js";
 import type { MapNode, TreeMapModel } from "./model.js";
 
@@ -36,7 +36,10 @@ const MASK_TO_BOX = new Map<number, string>([
 	[DIR_UP | DIR_DOWN | DIR_LEFT, "┤"],
 	[DIR_LEFT | DIR_RIGHT | DIR_DOWN, "┬"],
 	[DIR_LEFT | DIR_RIGHT | DIR_UP, "┴"],
-	[DIR_UP | DIR_RIGHT | DIR_DOWN | DIR_LEFT, "┼"],
+	// Avoid rendering visual crossings. Four-way overlap can happen when one
+	// edge group's endpoint lands on another group's trunk. Prefer tee shape so
+	// segments read as meeting at endpoint instead of crossing through.
+	[DIR_UP | DIR_RIGHT | DIR_DOWN | DIR_LEFT, "├"],
 ]);
 
 const BOX_TO_MASK = new Map<string, number>([
@@ -69,6 +72,10 @@ function putLine(canvas: string[][], x: number, y: number, mask: number): void {
 		const prevMask = BOX_TO_MASK.get(prev);
 		if (prevMask === undefined) return;
 		mask |= prevMask;
+	}
+	if (mask === (DIR_UP | DIR_RIGHT | DIR_DOWN | DIR_LEFT)) {
+		// Never draw a cross. Keep one side as endpoint marker instead.
+		mask = DIR_UP | DIR_RIGHT | DIR_DOWN;
 	}
 	canvas[y][x] = MASK_TO_BOX.get(mask) || prev;
 }
@@ -422,18 +429,16 @@ export function renderTreeMap(
 	let renderOffsetX = 0;
 	let renderOffsetY = 0;
 
-	if (fitsViewport) {
+	if (selected) {
+		// Keep selected node centered even near graph edges. Camera may go
+		// negative; renderer fills out-of-world space with blanks.
+		camera.cameraX = selected.x + Math.floor(selected.w / 2) - Math.floor(viewportWidth / 2);
+		camera.cameraY = selected.y + Math.floor(selected.h / 2) - Math.floor(mapHeight / 2);
+	} else if (fitsViewport) {
 		camera.cameraX = 0;
 		camera.cameraY = 0;
 		renderOffsetX = Math.floor((viewportWidth - contentW) / 2) - bounds.minX;
 		renderOffsetY = Math.floor((mapHeight - contentH) / 2) - bounds.minY;
-	} else if (selected) {
-		const targetX = selected.x + Math.floor(selected.w / 2) - Math.floor(viewportWidth / 2);
-		const targetY = selected.y + Math.floor(NODE_H / 2) - Math.floor(mapHeight / 2);
-		const maxCamX = Math.max(0, bounds.maxX + padding - viewportWidth + 1);
-		const maxCamY = Math.max(0, bounds.maxY + padding - mapHeight + 1);
-		camera.cameraX = clamp(targetX, 0, maxCamX);
-		camera.cameraY = clamp(targetY, 0, maxCamY);
 	}
 
 	const drawNodes = model.nodes.map((n) => ({ ...n, x: n.x + renderOffsetX, y: n.y + renderOffsetY }));
