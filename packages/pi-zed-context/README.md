@@ -18,9 +18,21 @@ Pi extension exposing a `zed_context` tool. It reads Zed's local SQLite DB to re
 - all disjoint selections in the active buffer as `selections[]`
 - selected text, truncated by `maxTextChars` across selections
 
-## Command
+## Commands
 
 `/zed-context` shows current detected Zed context in Pi UI.
+
+## `@zed:` references
+
+In interactive Pi, type `@zed:` to autocomplete current Zed selections/open files.
+
+Supported refs:
+
+- `@zed:0` — first Zed editor selection in the current/open editor list
+- `@zed:0:1` — second non-empty selection for editor 0
+- `@zed:file:/absolute/or/workspace/path` — open file contents
+
+Before sending input to the model, the extension expands refs into XML-ish blocks like `<zed-selection ...>` or `<zed-file ...>` using Zed's unsaved buffer contents when available.
 
 ## Skill
 

@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -38,6 +39,10 @@ type RawZedRow = {
 	workspace_id: number;
 	workspace_paths: string | null;
 	timestamp: string | null;
+	pane_id?: number | null;
+	pane_active?: number | null;
+	position?: number | null;
+	tab_active?: number | null;
 	buffer_path: string | null;
 	contents: string | null;
 	selection_start: number | null;
@@ -82,12 +87,37 @@ type ZedContextResult =
 	| { ok: true; context: ZedContext }
 	| { ok: false; error: string; details?: unknown };
 
+type ZedEditorRef = {
+	ref: string;
+	fileRef: string;
+	dbPath: string;
+	cwd: string;
+	workspaceMatched: boolean;
+	workspaceScore: number;
+	workspacePaths: string[];
+	filePath: string;
+	displayPath: string;
+	contents: string;
+	contentsTruncated: boolean;
+	active: boolean;
+	paneActive: boolean;
+	selections: ZedSelection[];
+};
+
+type ZedEditorsResult =
+	| { ok: true; editors: ZedEditorRef[] }
+	| { ok: false; error: string; details?: unknown };
+
 const ZED_ACTIVE_EDITORS_QUERY = `
 select
   e.item_id as editor_id,
   e.workspace_id as workspace_id,
   w.paths as workspace_paths,
   w.timestamp as timestamp,
+  i.pane_id as pane_id,
+  p.active as pane_active,
+  i.position as position,
+  i.active as tab_active,
   e.buffer_path as buffer_path,
   e.contents as contents,
   s.start as selection_start,
@@ -99,6 +129,29 @@ join editors e on e.item_id = i.item_id and e.workspace_id = i.workspace_id
 left join editor_selections s on s.editor_id = e.item_id and s.workspace_id = e.workspace_id
 where i.active = 1 and p.active = 1 and i.kind = 'Editor' and e.buffer_path is not null
 order by w.timestamp desc;
+`;
+
+const ZED_OPEN_EDITORS_QUERY = `
+select
+  e.item_id as editor_id,
+  e.workspace_id as workspace_id,
+  w.paths as workspace_paths,
+  w.timestamp as timestamp,
+  i.pane_id as pane_id,
+  p.active as pane_active,
+  i.position as position,
+  i.active as tab_active,
+  e.buffer_path as buffer_path,
+  e.contents as contents,
+  s.start as selection_start,
+  s.end as selection_end
+from items i
+join panes p on p.pane_id = i.pane_id and p.workspace_id = i.workspace_id
+join workspaces w on w.workspace_id = i.workspace_id
+join editors e on e.item_id = i.item_id and e.workspace_id = i.workspace_id
+left join editor_selections s on s.editor_id = e.item_id and s.workspace_id = e.workspace_id
+where i.kind = 'Editor' and e.buffer_path is not null
+order by w.timestamp desc, p.active desc, i.active desc, i.position asc;
 `;
 
 export default function zedContextExtension(pi: ExtensionAPI) {
@@ -115,7 +168,7 @@ export default function zedContextExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params: ZedContextParams, signal, onUpdate, ctx) {
 			onUpdate?.({ content: [{ type: "text", text: "Reading Zed active editor state..." }] });
 			const result = await readZedContext(ctx.cwd, params, signal);
-			if (!result.ok) throw new Error(result.error);
+			if (result.ok === false) throw new Error(result.error);
 
 			return {
 				content: [{ type: "text", text: formatZedContext(result.context) }],
@@ -138,6 +191,15 @@ export default function zedContextExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		ctx.ui.setStatus("zed-context", "Zed context tool ready");
+		ctx.ui.addAutocompleteProvider((current) => createZedAutocompleteProvider(current, () => readZedEditors(ctx.cwd, { allowUnmatchedWorkspace: true }, ctx.signal)));
+	});
+
+	pi.on("input", async (event, ctx) => {
+		if (!event.text.includes("@zed:")) return { action: "continue" };
+		const result = await readZedEditors(ctx.cwd, { allowUnmatchedWorkspace: true }, ctx.signal);
+		if (result.ok === false) return { action: "continue" };
+		const expanded = expandZedReferences(event.text, result.editors);
+		return expanded === event.text ? { action: "continue" } : { action: "transform", text: expanded, images: event.images };
 	});
 }
 
@@ -151,7 +213,7 @@ async function readZedContext(cwd: string, params: ZedContextParams, signal?: Ab
 	}
 
 	const rowsResult = await readActiveEditorRows(dbPath, signal);
-	if (!rowsResult.ok) return rowsResult;
+	if (rowsResult.ok === false) return rowsResult;
 
 	const candidates = buildCandidates(rowsResult.rows, cwd);
 	const candidate = pickCandidate(candidates, params.allowUnmatchedWorkspace === true);
@@ -191,12 +253,63 @@ async function readZedContext(cwd: string, params: ZedContextParams, signal?: Ab
 	};
 }
 
+async function readZedEditors(cwd: string, params: ZedContextParams, signal?: AbortSignal): Promise<ZedEditorsResult> {
+	const dbPath = resolveZedDbPath();
+	if (!dbPath) {
+		return { ok: false, error: "Zed DB not found. Open Zed once, or set PI_ZED_CONTEXT_DB=/path/to/db.sqlite." };
+	}
+
+	const rowsResult = await readEditorRows(dbPath, ZED_OPEN_EDITORS_QUERY, signal);
+	if (rowsResult.ok === false) return rowsResult;
+
+	const candidates = buildCandidates(rowsResult.rows, cwd).filter(
+		(candidate) => candidate.workspaceScore > 0 || params.allowUnmatchedWorkspace === true,
+	);
+	const recentCandidates = [...candidates].sort(compareCandidatesByRecency);
+	const maxTextChars = normalizeMaxTextChars(params.maxTextChars);
+
+	return {
+		ok: true,
+		editors: recentCandidates.map((candidate, index) => {
+			const rawText = candidate.row.contents ?? readFileIfPossible(candidate.row.buffer_path) ?? "";
+			const text = rawText.slice(0, maxTextChars);
+			const selections = buildSelections(rawText, candidate.selectionRows, maxTextChars);
+			const displayPath = pathInside(cwd, candidate.row.buffer_path) ?? candidate.row.buffer_path;
+			const fileRef = `@zed:file:${encodeZedRef(candidate.row.buffer_path)}`;
+			return {
+				ref: `@zed:${index}`,
+				fileRef,
+				dbPath,
+				cwd,
+				workspaceMatched: candidate.workspaceScore > 0,
+				workspaceScore: candidate.workspaceScore,
+				workspacePaths: candidate.workspacePaths,
+				filePath: candidate.row.buffer_path,
+				displayPath,
+				contents: text,
+				contentsTruncated: text.length < rawText.length,
+				active: candidate.row.tab_active === 1,
+				paneActive: candidate.row.pane_active === 1,
+				selections,
+			};
+		}),
+	};
+}
+
 async function readActiveEditorRows(
 	dbPath: string,
 	signal?: AbortSignal,
 ): Promise<{ ok: true; rows: RawZedRow[] } | { ok: false; error: string; details?: unknown }> {
+	return readEditorRows(dbPath, ZED_ACTIVE_EDITORS_QUERY, signal);
+}
+
+async function readEditorRows(
+	dbPath: string,
+	query: string,
+	signal?: AbortSignal,
+): Promise<{ ok: true; rows: RawZedRow[] } | { ok: false; error: string; details?: unknown }> {
 	try {
-		const { stdout } = await execFileAsync("sqlite3", ["-readonly", "-json", dbPath, ZED_ACTIVE_EDITORS_QUERY], {
+		const { stdout } = await execFileAsync("sqlite3", ["-readonly", "-json", dbPath, query], {
 			encoding: "utf8",
 			maxBuffer: SQLITE_MAX_BUFFER_BYTES,
 			signal,
@@ -241,6 +354,16 @@ function buildCandidates(rows: RawZedRow[], cwd: string): EditorCandidate[] {
 			right.workspaceScore - left.workspaceScore ||
 			String(right.row.timestamp ?? "").localeCompare(String(left.row.timestamp ?? "")) ||
 			left.key.localeCompare(right.key),
+	);
+}
+
+function compareCandidatesByRecency(left: EditorCandidate, right: EditorCandidate): number {
+	return (
+		String(right.row.timestamp ?? "").localeCompare(String(left.row.timestamp ?? "")) ||
+		Number(right.row.pane_active ?? 0) - Number(left.row.pane_active ?? 0) ||
+		Number(right.row.tab_active ?? 0) - Number(left.row.tab_active ?? 0) ||
+		Number(left.row.position ?? 0) - Number(right.row.position ?? 0) ||
+		left.key.localeCompare(right.key)
 	);
 }
 
@@ -388,6 +511,100 @@ function formatZedContext(context: ZedContext): string {
 	]
 		.filter(Boolean)
 		.join("\n");
+}
+
+function zedReferenceItems(editors: ZedEditorRef[]): AutocompleteItem[] {
+	const items: AutocompleteItem[] = [];
+	for (const editor of editors) {
+		const nonEmptySelections = editor.selections.filter((selection) => !selection.isEmpty);
+		for (let index = 0; index < nonEmptySelections.length; index++) {
+			const selection = nonEmptySelections[index]!;
+			const suffix = nonEmptySelections.length > 1 ? `:${index}` : "";
+			items.push({
+				value: `${editor.ref}${suffix}`,
+				label: `${editor.active ? "● " : ""}${editor.displayPath} ${formatSelectionSummary(selection)}`,
+				description: `${editor.ref}${suffix}`,
+			});
+		}
+
+		items.push({
+			value: editor.fileRef,
+			label: `${editor.active ? "● " : ""}${editor.displayPath}`,
+			description: editor.fileRef,
+		});
+	}
+	return items;
+}
+
+function createZedAutocompleteProvider(current: AutocompleteProvider, getEditors: () => Promise<ZedEditorsResult>): AutocompleteProvider {
+	return {
+		async getSuggestions(lines, cursorLine, cursorCol, options): Promise<AutocompleteSuggestions | null> {
+			const currentLine = lines[cursorLine] ?? "";
+			const textBeforeCursor = currentLine.slice(0, cursorCol);
+			const match = textBeforeCursor.match(/(?:^|[ \t])(@zed:[^\s]*)$/);
+			if (!match) return current.getSuggestions(lines, cursorLine, cursorCol, options);
+
+			const prefix = match[1]!;
+			const result = await getEditors();
+			if (options.signal.aborted || result.ok === false) return current.getSuggestions(lines, cursorLine, cursorCol, options);
+
+			const query = prefix.toLowerCase();
+			const items = zedReferenceItems(result.editors)
+				.filter((item) => `${item.value} ${item.label} ${item.description ?? ""}`.toLowerCase().includes(query))
+				.slice(0, 30);
+			return items.length > 0 ? { items, prefix } : current.getSuggestions(lines, cursorLine, cursorCol, options);
+		},
+
+		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+			return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+		},
+
+		shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
+		},
+	};
+}
+
+function expandZedReferences(text: string, editors: ZedEditorRef[]): string {
+	return text.replace(/@zed:(file:([^\s]+)|\d+(?::\d+)?)/g, (token: string, _body: string, encodedPath: string | undefined) => {
+		if (encodedPath) {
+			const decodedPath = decodeZedRef(encodedPath);
+			const editor = editors.find((item) => item.filePath === decodedPath);
+			if (!editor) return token;
+			return formatZedBlock("file", editor, undefined, editor.contents, editor.contentsTruncated);
+		}
+
+		const match = token.match(/^@zed:(\d+)(?::(\d+))?$/);
+		if (!match) return token;
+		const editor = editors[Number(match[1])];
+		if (!editor) return token;
+		const nonEmptySelections = editor.selections.filter((selection) => !selection.isEmpty);
+		const selection = nonEmptySelections[Number(match[2] ?? 0)] ?? nonEmptySelections[0];
+		if (!selection) return token;
+		return formatZedBlock("selection", editor, selection, selection.selectedText, selection.selectedTextTruncated);
+	});
+}
+
+function formatZedBlock(kind: "selection" | "file", editor: ZedEditorRef, selection: ZedSelection | undefined, content: string, truncated: boolean): string {
+	const lineAttr = selection ? ` lines="${selection.lineStart}-${selection.lineEnd}"` : "";
+	const truncatedAttr = truncated ? ` truncated="true"` : "";
+	return `<zed-${kind} file="${escapeXml(editor.displayPath)}"${lineAttr}${truncatedAttr}>\n${content}\n</zed-${kind}>`;
+}
+
+function encodeZedRef(value: string): string {
+	return encodeURIComponent(value).replace(/%2F/g, "/");
+}
+
+function decodeZedRef(value: string): string {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		return value;
+	}
+}
+
+function escapeXml(value: string): string {
+	return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function formatSelectedText(selection: ZedSelection, index: number, selectionCount: number): string | undefined {
