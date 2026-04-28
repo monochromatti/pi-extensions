@@ -395,6 +395,7 @@ async function extractQuestionsWithModel(
 	models: Model<Api>[],
 	modelRegistry: ModelRegistry,
 	lastAssistantText: string,
+	conversationContext: string,
 	signal: AbortSignal | undefined,
 ): Promise<ExtractionResult> {
 	let lastResponseText = "";
@@ -405,6 +406,13 @@ async function extractQuestionsWithModel(
 		lastResponseText = "";
 
 		for (let attempt = 1; attempt <= EXTRACTION_MAX_ATTEMPTS; attempt++) {
+			const extractionInput = conversationContext
+				? "Use conversation context only to clarify wording and options. Extract questions ONLY from the latest assistant message.\n\nConversation context:\n" +
+					conversationContext +
+					"\n\nLatest assistant message:\n" +
+					lastAssistantText
+				: "Latest assistant message:\n" + lastAssistantText;
+
 			const responseText =
 				attempt === 1
 					? await completeForJson(
@@ -417,14 +425,15 @@ async function extractQuestionsWithModel(
 										{
 											type: "text",
 											text:
-												"Extract all questions that require an answer from this assistant message. Return ONLY valid JSON. No markdown fences. No prose.\n\nAssistant message:\n" +
-												lastAssistantText,
+												"Extract all questions that require an answer from the latest assistant message. Return ONLY valid JSON. No markdown fences. No prose.\n\n" +
+												extractionInput,
 										},
 									],
 									timestamp: Date.now(),
 								},
 							],
-							SYSTEM_PROMPT + "\n\nIMPORTANT: Return ONLY a valid JSON object. Do not wrap it in markdown. Do not include commentary.",
+							SYSTEM_PROMPT +
+								"\n\nIMPORTANT: Return ONLY a valid JSON object. Do not wrap it in markdown. Do not include commentary. Extract questions ONLY from the latest assistant message; prior context is only for disambiguation.",
 							signal,
 						)
 					: await completeForJson(
@@ -437,8 +446,8 @@ async function extractQuestionsWithModel(
 										{
 											type: "text",
 											text:
-												"The previous output was invalid or empty. Try again from the original assistant message and return ONLY valid JSON matching the schema.\n\nOriginal assistant message:\n" +
-												lastAssistantText +
+												"The previous output was invalid or empty. Try again and return ONLY valid JSON matching the schema. Extract questions ONLY from the latest assistant message.\n\n" +
+												extractionInput +
 												"\n\nPrevious invalid output:\n" +
 												(lastResponseText || "(empty)"),
 										},
@@ -469,7 +478,7 @@ async function extractQuestionsWithModel(
 class QnAComponent implements Component {
 	private questions: ExtractedQuestion[];
 	private answers: string[];
-	private selectedOptions: Array<number | null>;
+	private selectedOptions: Array<Set<number>>;
 	private currentIndex = 0;
 	private editor: Editor;
 	private tui: TUI;
@@ -491,7 +500,7 @@ class QnAComponent implements Component {
 	constructor(questions: ExtractedQuestion[], tui: TUI, onDone: (result: string | null) => void) {
 		this.questions = questions;
 		this.answers = questions.map(() => "");
-		this.selectedOptions = questions.map(() => null);
+		this.selectedOptions = questions.map(() => new Set<number>());
 		this.tui = tui;
 		this.onDone = onDone;
 
@@ -555,13 +564,17 @@ class QnAComponent implements Component {
 			return false;
 		}
 
-		const matchedIndex = options.findIndex((option) => option.label === data);
+		const matchedIndex = options.findIndex((option) => option.label?.toLowerCase() === data.toLowerCase());
 		if (matchedIndex === -1) {
 			return false;
 		}
 
-		this.selectedOptions[this.currentIndex] =
-			this.selectedOptions[this.currentIndex] === matchedIndex ? null : matchedIndex;
+		const selected = this.selectedOptions[this.currentIndex];
+		if (selected.has(matchedIndex)) {
+			selected.delete(matchedIndex);
+		} else {
+			selected.add(matchedIndex);
+		}
 		this.invalidate();
 		this.tui.requestRender();
 		return true;
@@ -579,11 +592,14 @@ class QnAComponent implements Component {
 			if (q.context) {
 				parts.push(`> ${q.context}`);
 			}
-			const selectedOptionIndex = this.selectedOptions[i];
-			if (q.options?.length && selectedOptionIndex !== null && selectedOptionIndex !== undefined) {
-				const selectedOption = q.options[selectedOptionIndex];
-				if (selectedOption) {
-					parts.push(`Choice: ${this.formatOption(selectedOption)}`);
+			const selectedOptionIndexes = [...this.selectedOptions[i]].sort((a, b) => a - b);
+			if (q.options?.length && selectedOptionIndexes.length > 0) {
+				parts.push(selectedOptionIndexes.length === 1 ? "Choice:" : "Choices:");
+				for (const selectedOptionIndex of selectedOptionIndexes) {
+					const selectedOption = q.options[selectedOptionIndex];
+					if (selectedOption) {
+						parts.push(`- ${this.formatOption(selectedOption)}`);
+					}
 				}
 			}
 			parts.push(`A: ${a}`);
@@ -754,15 +770,15 @@ class QnAComponent implements Component {
 
 		if (q.options?.length) {
 			lines.push(padToWidth(emptyBoxLine()));
-			const selectedOptionIndex = this.selectedOptions[this.currentIndex];
-			const optionHint = this.dim("Options (press the option label while the answer is empty)");
+			const selectedOptionIndexes = this.selectedOptions[this.currentIndex];
+			const optionHint = this.dim("Options (press labels while answer is empty; multi-select allowed)");
 			for (const line of wrapTextWithAnsi(optionHint, contentWidth)) {
 				lines.push(padToWidth(boxLine(line)));
 			}
 			for (let i = 0; i < q.options.length; i++) {
 				const option = q.options[i];
-				const isSelected = selectedOptionIndex === i;
-				const prefix = isSelected ? this.green("◉") : this.dim("◯");
+				const isSelected = selectedOptionIndexes.has(i);
+				const prefix = isSelected ? this.green("☑") : this.dim("☐");
 				const optionText = `${prefix} ${isSelected ? this.bold(this.formatOption(option)) : this.formatOption(option)}`;
 				const wrappedOption = wrapTextWithAnsi(optionText, contentWidth);
 				for (const line of wrappedOption) {
@@ -798,7 +814,7 @@ class QnAComponent implements Component {
 		} else {
 			lines.push(padToWidth(this.dim("├" + horizontalLine(boxWidth - 2) + "┤")));
 			const optionControls = q.options?.length
-				? ` · ${this.dim(this.optionShortcutHint(q))} select option`
+				? ` · ${this.dim(this.optionShortcutHint(q))} toggle option(s)`
 				: "";
 			const controls = `${this.dim("Tab/Enter")} next · ${this.dim("Shift+Tab")} prev · ${this.dim("Shift+Enter")} newline${optionControls} · ${this.dim("Esc")} cancel`;
 			lines.push(padToWidth(boxLine(truncateToWidth(controls, contentWidth))));
@@ -809,6 +825,37 @@ class QnAComponent implements Component {
 		this.cachedLines = lines;
 		return lines;
 	}
+}
+
+function messageText(message: unknown): string {
+	if (!message || typeof message !== "object") return "";
+	const content = (message as { content?: unknown }).content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((part): part is { type: string; text: string } =>
+			!!part && typeof part === "object" && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string",
+		)
+		.map((part) => part.text)
+		.join("\n");
+}
+
+function buildConversationContext(branch: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>, latestAssistantIndex: number): string {
+	const contextEntries: string[] = [];
+	const start = Math.max(0, latestAssistantIndex - 8);
+
+	for (let i = start; i <= latestAssistantIndex; i++) {
+		const entry = branch[i];
+		if (entry?.type !== "message") continue;
+		const msg = entry.message;
+		if (!("role" in msg) || (msg.role !== "user" && msg.role !== "assistant")) continue;
+		const text = messageText(msg).trim();
+		if (!text) continue;
+		const label = i === latestAssistantIndex ? "latest assistant" : msg.role;
+		contextEntries.push(`${label}:\n${text}`);
+	}
+
+	return contextEntries.join("\n\n---\n\n");
 }
 
 export default function (pi: ExtensionAPI) {
@@ -826,6 +873,7 @@ export default function (pi: ExtensionAPI) {
 		// Find the last assistant message on the current branch
 		const branch = ctx.sessionManager.getBranch();
 		let lastAssistantText: string | undefined;
+		let lastAssistantIndex = -1;
 
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
@@ -836,11 +884,10 @@ export default function (pi: ExtensionAPI) {
 						ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
 						return;
 					}
-					const textParts = msg.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text);
-					if (textParts.length > 0) {
-						lastAssistantText = textParts.join("\n");
+					const text = messageText(msg);
+					if (text.length > 0) {
+						lastAssistantText = text;
+						lastAssistantIndex = i;
 						break;
 					}
 				}
@@ -852,6 +899,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		const conversationContext = buildConversationContext(branch, lastAssistantIndex);
 		const extractionModels = await selectExtractionModels(ctx.model, ctx.modelRegistry);
 
 		// Run extraction with loader UI
@@ -869,6 +917,7 @@ export default function (pi: ExtensionAPI) {
 						extractionModels,
 						ctx.modelRegistry,
 						lastAssistantText!,
+						conversationContext,
 						loader.signal,
 					);
 				} catch (error) {
