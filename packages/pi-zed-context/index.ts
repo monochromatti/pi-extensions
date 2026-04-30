@@ -14,6 +14,7 @@ const extensionDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MAX_TEXT_CHARS = 20_000;
 const HARD_MAX_TEXT_CHARS = 200_000;
 const SQLITE_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
+const MAX_AUTOCOMPLETE_ITEMS = 30;
 
 const TOOL_PARAMS = Type.Object({
 	maxTextChars: Type.Optional(
@@ -548,10 +549,12 @@ function createZedAutocompleteProvider(current: AutocompleteProvider, getEditors
 			const result = await getEditors();
 			if (options.signal.aborted || result.ok === false) return current.getSuggestions(lines, cursorLine, cursorCol, options);
 
-			const query = prefix.toLowerCase();
-			const items = zedReferenceItems(result.editors)
-				.filter((item) => `${item.value} ${item.label} ${item.description ?? ""}`.toLowerCase().includes(query))
-				.slice(0, 30);
+			const allItems = zedReferenceItems(result.editors);
+			const query = prefix.slice("@zed:".length).toLowerCase();
+			const items = (query.length === 0
+				? allItems
+				: allItems.filter((item) => `${item.value} ${item.label} ${item.description ?? ""}`.toLowerCase().includes(query)))
+				.slice(0, MAX_AUTOCOMPLETE_ITEMS);
 			return items.length > 0 ? { items, prefix } : current.getSuggestions(lines, cursorLine, cursorCol, options);
 		},
 
