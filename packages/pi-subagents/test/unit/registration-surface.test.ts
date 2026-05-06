@@ -1,0 +1,131 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import registerSubagentExtension from "../../src/extension/index.ts";
+
+const CHILD_ENV_KEYS = [
+	"PI_SUBAGENT_CHILD",
+	"PI_SUBAGENT_ORCHESTRATOR_TARGET",
+	"PI_SUBAGENT_RUN_ID",
+	"PI_SUBAGENT_CHILD_AGENT",
+	"PI_SUBAGENT_CHILD_INDEX",
+	"PI_SUBAGENT_INTERCOM_SESSION_NAME",
+] as const;
+
+function withEnv(env: Record<string, string | undefined>, fn: () => void): void {
+	const previous = new Map<string, string | undefined>();
+	for (const key of CHILD_ENV_KEYS) previous.set(key, process.env[key]);
+	try {
+		for (const key of CHILD_ENV_KEYS) delete process.env[key];
+		for (const [key, value] of Object.entries(env)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		fn();
+	} finally {
+		for (const key of CHILD_ENV_KEYS) {
+			const value = previous.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		const cleanup = (globalThis as { __piSubagentRuntimeCleanup?: unknown }).__piSubagentRuntimeCleanup;
+		if (typeof cleanup === "function") cleanup();
+	}
+}
+
+function createFakePi() {
+	const tools: Array<{ name: string; parameters?: unknown }> = [];
+	const commands: string[] = [];
+	const shortcuts: string[] = [];
+	const messageRenderers: string[] = [];
+	const handlers: string[] = [];
+	const eventHandlers: string[] = [];
+	const pi = {
+		registerTool(tool: { name: string; parameters?: unknown }) {
+			tools.push(tool);
+		},
+		registerCommand(name: string) {
+			commands.push(name);
+		},
+		registerShortcut(name: string) {
+			shortcuts.push(name);
+		},
+		registerMessageRenderer(name: string) {
+			messageRenderers.push(name);
+		},
+		on(name: string) {
+			handlers.push(name);
+		},
+		events: {
+			on(name: string) {
+				eventHandlers.push(name);
+				return () => {};
+			},
+			emit() {},
+		},
+		getSessionName() {
+			return "fake-session";
+		},
+		sendMessage() {},
+		appendEntry() {},
+	};
+	return { pi: pi as any, tools, commands, shortcuts, messageRenderers, handlers, eventHandlers };
+}
+
+function toolNames(tools: Array<{ name: string }>): string[] {
+	return tools.map((tool) => tool.name).sort();
+}
+
+test("10.7 normal session registers exactly public tools and no commands or shortcuts", () => {
+	withEnv({}, () => {
+		const fake = createFakePi();
+		registerSubagentExtension(fake.pi);
+
+		assert.deepEqual(toolNames(fake.tools), ["intercom", "subagent"]);
+		assert.deepEqual(fake.commands, []);
+		assert.deepEqual(fake.shortcuts, []);
+		assert.equal(fake.tools.some((tool) => tool.name === "contact_supervisor"), false);
+	});
+});
+
+test("8.3 child subagent session registers contact_supervisor", () => {
+	withEnv({
+		PI_SUBAGENT_CHILD: "1",
+		PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-session",
+		PI_SUBAGENT_RUN_ID: "run-123",
+		PI_SUBAGENT_CHILD_AGENT: "worker",
+		PI_SUBAGENT_CHILD_INDEX: "0",
+	}, () => {
+		const fake = createFakePi();
+		registerSubagentExtension(fake.pi);
+
+		assert.deepEqual(toolNames(fake.tools), ["contact_supervisor", "intercom"]);
+		assert.deepEqual(fake.commands, []);
+		assert.deepEqual(fake.shortcuts, []);
+	});
+});
+
+test("7.3 intercom public action schema exposes supported actions", () => {
+	withEnv({}, () => {
+		const fake = createFakePi();
+		registerSubagentExtension(fake.pi);
+		const intercom = fake.tools.find((tool) => tool.name === "intercom") as { parameters?: { properties?: { action?: { enum?: string[] } } } } | undefined;
+		assert.ok(intercom);
+		assert.deepEqual(intercom.parameters?.properties?.action?.enum, ["list", "send", "ask", "reply", "pending", "status"]);
+	});
+});
+
+test("8.3 contact_supervisor reason schema exposes child-only reasons", () => {
+	withEnv({
+		PI_SUBAGENT_CHILD: "1",
+		PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-session",
+		PI_SUBAGENT_RUN_ID: "run-123",
+		PI_SUBAGENT_CHILD_AGENT: "worker",
+		PI_SUBAGENT_CHILD_INDEX: "0",
+	}, () => {
+		const fake = createFakePi();
+		registerSubagentExtension(fake.pi);
+		const contact = fake.tools.find((tool) => tool.name === "contact_supervisor") as { parameters?: { properties?: { reason?: { enum?: string[] } } } } | undefined;
+		assert.ok(contact);
+		assert.deepEqual(contact.parameters?.properties?.reason?.enum, ["need_decision", "progress_update", "interview_request"]);
+	});
+});

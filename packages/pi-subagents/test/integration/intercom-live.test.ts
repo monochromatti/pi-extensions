@@ -1,0 +1,437 @@
+import assert from "node:assert/strict";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { EventEmitter, once } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { createEventBus, discoverAndLoadExtensions, ExtensionRunner } from "@mariozechner/pi-coding-agent";
+
+const packageDir = process.cwd().endsWith(path.join("packages", "pi-subagents"))
+	? process.cwd()
+	: path.join(process.cwd(), "packages/pi-subagents");
+const repoDir = path.dirname(path.dirname(packageDir));
+const sharedHome = mkdtempSync(path.join(tmpdir(), "pi-subagents-intercom-home-"));
+const previousHome = process.env.HOME;
+const previousUserProfile = process.env.USERPROFILE;
+process.env.HOME = sharedHome;
+process.env.USERPROFILE = sharedHome;
+
+process.on("exit", () => {
+	if (previousHome === undefined) delete process.env.HOME;
+	else process.env.HOME = previousHome;
+	if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+	else process.env.USERPROFILE = previousUserProfile;
+	rmSync(sharedHome, { recursive: true, force: true });
+});
+
+const CHILD_ENV_KEYS = [
+	"PI_SUBAGENT_CHILD",
+	"PI_SUBAGENT_ORCHESTRATOR_TARGET",
+	"PI_SUBAGENT_RUN_ID",
+	"PI_SUBAGENT_CHILD_AGENT",
+	"PI_SUBAGENT_CHILD_INDEX",
+	"PI_SUBAGENT_INTERCOM_SESSION_NAME",
+] as const;
+
+interface CapturedToolResult {
+	content: Array<{ type: string; text: string }>;
+	isError?: boolean;
+	details?: Record<string, unknown>;
+}
+
+interface CapturedTool {
+	name: string;
+	parameters?: unknown;
+	execute: (toolCallId: string, params: Record<string, unknown>, signal: AbortSignal, onUpdate: unknown, ctx: unknown) => Promise<CapturedToolResult>;
+}
+
+function wait(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntil(assertion: () => boolean, message: string, timeoutMs = 5000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (assertion()) return;
+		await wait(25);
+	}
+	throw new Error(message);
+}
+
+async function waitForBrokerReady(broker: ChildProcessWithoutNullStreams): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			cleanup();
+			reject(new Error("Broker startup timed out"));
+		}, 10000);
+		const onStdout = (chunk: Buffer) => {
+			if (chunk.toString().includes("Intercom broker started")) {
+				cleanup();
+				resolve();
+			}
+		};
+		const onStderr = (chunk: Buffer) => {
+			const text = chunk.toString();
+			if (/Error|ERR_|SyntaxError/.test(text)) {
+				cleanup();
+				reject(new Error(text));
+			}
+		};
+		const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+			cleanup();
+			reject(new Error(`Broker exited before startup (code=${code}, signal=${signal})`));
+		};
+		const cleanup = () => {
+			clearTimeout(timeout);
+			broker.stdout.off("data", onStdout);
+			broker.stderr.off("data", onStderr);
+			broker.off("exit", onExit);
+		};
+		broker.stdout.on("data", onStdout);
+		broker.stderr.on("data", onStderr);
+		broker.once("exit", onExit);
+	});
+}
+
+async function withBroker<T>(fn: () => Promise<T>): Promise<T> {
+	const broker = spawn(process.execPath, [
+		"--experimental-transform-types",
+		path.join(packageDir, "src/intercom-public/broker/broker.ts"),
+	], {
+		cwd: repoDir,
+		env: { ...process.env, HOME: sharedHome, USERPROFILE: sharedHome },
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	try {
+		await waitForBrokerReady(broker);
+		return await fn();
+	} finally {
+		broker.kill("SIGTERM");
+		await once(broker, "exit").catch(() => undefined);
+	}
+}
+
+async function withChildEnv<T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+	const previous = new Map<string, string | undefined>();
+	for (const key of CHILD_ENV_KEYS) previous.set(key, process.env[key]);
+	try {
+		for (const key of CHILD_ENV_KEYS) delete process.env[key];
+		for (const [key, value] of Object.entries(env)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		return await fn();
+	} finally {
+		for (const key of CHILD_ENV_KEYS) {
+			const value = previous.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}
+
+async function createHarness(sessionName: string, options: { idle?: boolean } = {}) {
+	// Use Pi's real extension loader/runner so tests exercise lifecycle, context,
+	// and tool registration semantics while keeping model/session behavior mocked.
+	const sentMessages: Array<{ message: { customType?: string; content?: string; details?: unknown }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
+	const entries: Array<{ type: string; data: unknown }> = [];
+	const activeTools: string[] = [];
+	let sessionCounter = 0;
+
+	const loaded = await discoverAndLoadExtensions(
+		[path.join(packageDir, "src/extension/index.ts")],
+		repoDir,
+		undefined,
+		createEventBus(),
+	);
+	assert.deepEqual(loaded.errors, []);
+
+	const sessionManager = {
+		getSessionFile: () => null,
+		getSessionId: () => `${sessionName}-session-${sessionCounter}`,
+	};
+	const modelRegistry = {
+		getAvailable: () => [],
+		registerProvider: () => undefined,
+		unregisterProvider: () => undefined,
+	};
+	const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, repoDir, sessionManager as never, modelRegistry as never);
+	runner.bindCore({
+		sendMessage(message: { customType?: string; content?: string; details?: unknown }, sendOptions?: { triggerTurn?: boolean; deliverAs?: string }) {
+			sentMessages.push({ message, options: sendOptions });
+		},
+		sendUserMessage: () => undefined,
+		appendEntry(type: string, data: unknown) {
+			entries.push({ type, data });
+		},
+		setSessionName: () => undefined,
+		getSessionName: () => sessionName,
+		setLabel: () => undefined,
+		getActiveTools: () => activeTools,
+		getAllTools: () => runner.getAllRegisteredTools().map((tool) => tool.definition.name),
+		setActiveTools(tools: string[]) {
+			activeTools.splice(0, activeTools.length, ...tools);
+		},
+		refreshTools: () => undefined,
+		getCommands: () => runner.getRegisteredCommands(),
+		setModel: async () => undefined,
+		getThinkingLevel: () => undefined,
+		setThinkingLevel: () => undefined,
+	} as never, {
+		getModel: () => ({ id: "test-model" }),
+		isIdle: () => options.idle ?? true,
+		getSignal: () => new AbortController().signal,
+		abort: () => undefined,
+		hasPendingMessages: () => false,
+		shutdown: () => undefined,
+		getContextUsage: () => undefined,
+		compact: () => undefined,
+		getSystemPrompt: () => "",
+	} as never);
+
+	return {
+		runner,
+		sentMessages,
+		entries,
+		get ctx() {
+			return runner.createContext();
+		},
+		async start() {
+			await runner.emit({ type: "session_start" } as never);
+			assert.ok(runner.getToolDefinition("intercom"), "runner should register intercom tool");
+			await this.tool("intercom").execute("status", { action: "status" }, new AbortController().signal, undefined, this.ctx);
+		},
+		async shutdown() {
+			await runner.emit({ type: "session_shutdown" } as never);
+			sessionCounter += 1;
+		},
+		tool(name: string): CapturedTool {
+			const tool = runner.getToolDefinition(name) as CapturedTool | undefined;
+			assert.ok(tool, `missing tool ${name}`);
+			return tool;
+		},
+	};
+}
+
+function text(result: CapturedToolResult): string {
+	return result.content.map((part) => part.text).join("\n");
+}
+
+test("7.5/7.6 intercom send delivers message and records pending inbound ask", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const sender = await createHarness("sender");
+		const receiver = await createHarness("receiver");
+		try {
+			await sender.start();
+			await receiver.start();
+			const sent = await sender.tool("intercom").execute("send", {
+				action: "send",
+				to: "receiver",
+				message: "hello receiver",
+				attachments: [{ type: "snippet", name: "note.ts", content: "const ok = true;", language: "ts" }],
+			}, new AbortController().signal, undefined, sender.ctx);
+			assert.equal(sent.isError, false);
+			await waitUntil(() => receiver.sentMessages.some((entry) => entry.message.content?.includes("hello receiver")), "receiver did not get sent message");
+			const delivered = receiver.sentMessages.map((entry) => entry.message.content ?? "").join("\n");
+			assert.match(delivered, /hello receiver/);
+			assert.match(delivered, /note\.ts/);
+			assert.match(delivered, /const ok = true/);
+
+			const pending = await receiver.tool("intercom").execute("pending", { action: "pending" }, new AbortController().signal, undefined, receiver.ctx);
+			assert.match(text(pending), /No unresolved inbound asks/);
+		} finally {
+			await sender.shutdown();
+			await receiver.shutdown();
+		}
+	});
+});
+
+test("7.7/7.8 intercom ask waits for reply tool response", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const asker = await createHarness("asker");
+		const answerer = await createHarness("answerer");
+		try {
+			await asker.start();
+			await answerer.start();
+			const askPromise = asker.tool("intercom").execute("ask", {
+				action: "ask",
+				to: "answerer",
+				message: "Need decision",
+			}, new AbortController().signal, undefined, asker.ctx);
+			await waitUntil(() => answerer.sentMessages.some((entry) => entry.message.content?.includes("Need decision")), "answerer did not receive ask");
+			const pending = await answerer.tool("intercom").execute("pending", { action: "pending" }, new AbortController().signal, undefined, answerer.ctx);
+			assert.match(text(pending), /Need decision/);
+			const reply = await answerer.tool("intercom").execute("reply", {
+				action: "reply",
+				message: "Use option B",
+			}, new AbortController().signal, undefined, answerer.ctx);
+			assert.equal(reply.isError, false);
+			const askResult = await askPromise;
+			assert.equal(askResult.isError, false);
+			assert.match(text(askResult), /Use option B/);
+		} finally {
+			await asker.shutdown();
+			await answerer.shutdown();
+		}
+	});
+});
+
+test("7.9/7.10 intercom ask reply includes attachment formatting", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const asker = await createHarness("attachment-asker");
+		const answerer = await createHarness("attachment-answerer");
+		try {
+			await asker.start();
+			await answerer.start();
+			const askPromise = asker.tool("intercom").execute("ask", {
+				action: "ask",
+				to: "attachment-answerer",
+				message: "Need file",
+			}, new AbortController().signal, undefined, asker.ctx);
+			await waitUntil(() => answerer.sentMessages.some((entry) => entry.message.content?.includes("Need file")), "answerer did not receive attachment ask");
+			const incomingDetails = answerer.sentMessages.at(-1)?.message.details as { message?: { id?: string } } | undefined;
+			const replyTo = incomingDetails?.message?.id;
+			assert.ok(replyTo);
+			const replyResult = await answerer.tool("intercom").execute("send", {
+				action: "send",
+				to: "attachment-asker",
+				message: "See attached",
+				replyTo,
+				attachments: [{ type: "file", name: "answer.md", content: "# Answer", language: "md" }],
+			}, new AbortController().signal, undefined, answerer.ctx);
+			assert.equal(replyResult.isError, false);
+			const askResult = await askPromise;
+			assert.match(text(askResult), /See attached/);
+			assert.match(text(askResult), /answer\.md/);
+			assert.match(text(askResult), /# Answer/);
+		} finally {
+			await asker.shutdown();
+			await answerer.shutdown();
+		}
+	});
+});
+
+test("8.5/8.6 contact_supervisor progress_update sends non-blocking update to parent", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const parent = await createHarness("parent-supervisor");
+		try {
+			await parent.start();
+			await withChildEnv({
+				PI_SUBAGENT_CHILD: "1",
+				PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-supervisor",
+				PI_SUBAGENT_RUN_ID: "run-progress",
+				PI_SUBAGENT_CHILD_AGENT: "worker",
+				PI_SUBAGENT_CHILD_INDEX: "0",
+			}, async () => {
+				const child = await createHarness("child-progress");
+				try {
+					await child.start();
+					assert.ok(child.runner.getToolDefinition("contact_supervisor"), "runner should register child supervisor tool");
+					const result = await child.tool("contact_supervisor").execute("contact", {
+						reason: "progress_update",
+						message: "UPDATE: half done",
+					}, new AbortController().signal, undefined, child.ctx);
+					assert.equal(result.isError, false);
+					await waitUntil(() => parent.sentMessages.some((entry) => entry.message.content?.includes("UPDATE: half done")), "parent did not receive progress update");
+					assert.match(parent.sentMessages.map((entry) => entry.message.content ?? "").join("\n"), /Run: run-progress/);
+				} finally {
+					await child.shutdown();
+				}
+			});
+		} finally {
+			await parent.shutdown();
+		}
+	});
+});
+
+test("8.7/8.8 contact_supervisor need_decision waits for parent reply", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const parent = await createHarness("decision-parent");
+		try {
+			await parent.start();
+			await withChildEnv({
+				PI_SUBAGENT_CHILD: "1",
+				PI_SUBAGENT_ORCHESTRATOR_TARGET: "decision-parent",
+				PI_SUBAGENT_RUN_ID: "run-decision",
+				PI_SUBAGENT_CHILD_AGENT: "worker",
+				PI_SUBAGENT_CHILD_INDEX: "1",
+			}, async () => {
+				const child = await createHarness("decision-child");
+				try {
+					await child.start();
+					assert.ok(child.runner.getToolDefinition("contact_supervisor"), "runner should register child supervisor tool");
+					const decisionPromise = child.tool("contact_supervisor").execute("contact", {
+						reason: "need_decision",
+						message: "Should I proceed?",
+					}, new AbortController().signal, undefined, child.ctx);
+					await waitUntil(() => parent.sentMessages.some((entry) => entry.message.content?.includes("Should I proceed?")), "parent did not receive decision ask");
+					const reply = await parent.tool("intercom").execute("reply", {
+						action: "reply",
+						message: "Proceed carefully",
+					}, new AbortController().signal, undefined, parent.ctx);
+					assert.equal(reply.isError, false);
+					const decision = await decisionPromise;
+					assert.equal(decision.isError, false);
+					assert.match(text(decision), /Proceed carefully/);
+				} finally {
+					await child.shutdown();
+				}
+			});
+		} finally {
+			await parent.shutdown();
+		}
+	});
+});
+
+test("8.9/8.10 contact_supervisor interview_request returns structured responses", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const parent = await createHarness("interview-parent");
+		try {
+			await parent.start();
+			await withChildEnv({
+				PI_SUBAGENT_CHILD: "1",
+				PI_SUBAGENT_ORCHESTRATOR_TARGET: "interview-parent",
+				PI_SUBAGENT_RUN_ID: "run-interview",
+				PI_SUBAGENT_CHILD_AGENT: "planner",
+				PI_SUBAGENT_CHILD_INDEX: "2",
+			}, async () => {
+				const child = await createHarness("interview-child");
+				try {
+					await child.start();
+					assert.ok(child.runner.getToolDefinition("contact_supervisor"), "runner should register child supervisor tool");
+					const interviewPromise = child.tool("contact_supervisor").execute("contact", {
+						reason: "interview_request",
+						message: "Need structured choices",
+						interview: {
+							title: "Scope",
+							questions: [
+								{ id: "scope", type: "single", question: "Which scope?", options: ["minimal", "full"] },
+								{ id: "notes", type: "text", question: "Any notes?" },
+							],
+						},
+					}, new AbortController().signal, undefined, child.ctx);
+					await waitUntil(() => parent.sentMessages.some((entry) => entry.message.content?.includes("Need structured choices")), "parent did not receive interview request");
+					const parentMessageText = parent.sentMessages.map((entry) => entry.message.content ?? "").join("\n");
+					assert.match(parentMessageText, /Which scope\?/);
+					assert.match(parentMessageText, /minimal/);
+					const reply = await parent.tool("intercom").execute("reply", {
+						action: "reply",
+						message: JSON.stringify({ responses: [{ id: "scope", value: "minimal" }, { id: "notes", value: "ship lean" }] }),
+					}, new AbortController().signal, undefined, parent.ctx);
+					assert.equal(reply.isError, false);
+					const interview = await interviewPromise;
+					assert.equal(interview.isError, false);
+					assert.match(text(interview), /responses/);
+					assert.deepEqual(interview.details?.structuredReply, {
+						responses: [{ id: "scope", value: "minimal" }, { id: "notes", value: "ship lean" }],
+					});
+				} finally {
+					await child.shutdown();
+				}
+			});
+		} finally {
+			await parent.shutdown();
+		}
+	});
+});
