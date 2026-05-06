@@ -10,10 +10,12 @@
     "extensions": [
       "./packages/pi-tree-map/index.ts",
       "./packages/pi-answer/index.ts",
-      "./packages/pi-zed-context/index.ts"
+      "./packages/pi-zed-context/index.ts",
+      "./packages/pi-subagents/src/extension/index.ts"
     ],
     "skills": [
-      "./packages/pi-zed-context/skills"
+      "./packages/pi-zed-context/skills",
+      "./packages/pi-subagents/skills"
     ]
   },
   "scripts": {
