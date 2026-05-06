@@ -15,8 +15,11 @@ import {
 	BorderedLoader,
 	type ExtensionAPI,
 	type ExtensionContext,
+	getAgentDir,
 	type ModelRegistry,
 } from "@mariozechner/pi-coding-agent";
+import fs from "node:fs/promises";
+import path from "node:path";
 import {
 	type Component,
 	Editor,
@@ -33,16 +36,36 @@ import {
 interface ExtractedOption {
 	label?: string;
 	text: string;
+	description?: string;
 }
 
 interface ExtractedQuestion {
+	id?: string;
+	header?: string;
 	question: string;
 	context?: string;
+	type: "freeform" | "single" | "multi";
 	options?: ExtractedOption[];
 }
 
 interface ExtractionResult {
 	questions: ExtractedQuestion[];
+}
+
+interface AnswerSettings {
+	systemPrompt?: string;
+	extractionModels?: Array<{ provider: string; id: string }>;
+	drafts?: { enabled?: boolean; autosaveMs?: number; promptOnRestore?: boolean };
+}
+
+interface AnswerDraft {
+	version: number;
+	sourceEntryId: string;
+	questions: ExtractedQuestion[];
+	answers: string[];
+	selectedOptions: number[][];
+	state: "draft" | "cleared";
+	updatedAt: number;
 }
 
 type ExtractionOutcome =
@@ -58,12 +81,16 @@ Output a JSON object with this structure:
 {
   "questions": [
     {
+      "id": "stable_snake_case_id",
+      "header": "Optional short display title",
       "question": "The question text",
       "context": "Optional context that helps answer the question",
+      "type": "freeform",
       "options": [
         {
           "label": "A",
-          "text": "First option"
+          "text": "First option",
+          "description": "Optional short explanation"
         }
       ]
     }
@@ -73,10 +100,18 @@ Output a JSON object with this structure:
 Rules:
 - Extract all questions that require user input
 - Keep questions in the order they appeared
+- Include stable snake_case \`id\` values when possible
+- Include short \`header\` values when useful for display; omit when question alone is clear
 - Be concise with question text
 - Include context only when it provides essential information for answering
-- If the assistant clearly provides explicit alternatives (for example A/B/C, numbered choices, or a short list of mutually exclusive options), include them in \`options\`
-- Only include \`options\` when the original text clearly presents real choices; never invent options
+- Decide each question's \`type\` independently:
+  - \`freeform\`: answer should be typed as freeform text; omit \`options\`
+  - \`single\`: user should choose exactly one explicit option
+  - \`multi\`: user may choose multiple explicit options
+- Use \`single\` or \`multi\` only when the assistant clearly provides explicit alternatives (for example A/B/C, numbered choices, checklists, or mutually exclusive choices)
+- Only include \`options\` for \`single\` and \`multi\` questions, and only when the original text clearly presents real choices; never invent options
+- Option \`text\` should fully represent the answer; include \`description\` only for extra explanation
+- Prefer \`single\` for mutually exclusive alternatives like “TypeScript or JavaScript?”; prefer \`multi\` for “choose any”, “which of these apply”, checklists, or additive options
 - If no questions are found, return {"questions": []}
 
 Example output:
@@ -84,10 +119,14 @@ Example output:
   "questions": [
     {
       "question": "What is your preferred database?",
+	  "id": "preferred_database",
+	  "header": "Database",
+      "type": "freeform",
       "context": "We can only configure MySQL and PostgreSQL because of what is implemented."
     },
     {
 	    "question": "Should we use TypeScript or JavaScript?",
+	    "type": "single",
 	    "options": [
 	      {
 	        "label": "A",
@@ -113,6 +152,7 @@ You will receive model output that was supposed to be valid JSON with this exact
     {
       "question": "The question text",
       "context": "Optional context that helps answer the question",
+      "type": "freeform",
       "options": [
         {
           "label": "A",
@@ -170,7 +210,7 @@ function sanitizeOptions(options: unknown): ExtractedOption[] | undefined {
 				return null;
 			}
 
-			const optionLike = option as { label?: unknown; text?: unknown };
+			const optionLike = option as { label?: unknown; text?: unknown; description?: unknown };
 			if (typeof optionLike.text !== "string") {
 				return null;
 			}
@@ -187,11 +227,35 @@ function sanitizeOptions(options: unknown): ExtractedOption[] | undefined {
 					usedLabels,
 				),
 				text,
+				description: typeof optionLike.description === "string" && optionLike.description.trim() ? optionLike.description.trim() : undefined,
 			};
 		})
 		.filter((option): option is ExtractedOption => option !== null);
 
 	return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function sanitizeQuestionType(type: unknown, options: ExtractedOption[] | undefined): ExtractedQuestion["type"] {
+	if (type === "single" && options?.length) return "single";
+	if (type === "multi" && options?.length) return "multi";
+	if (type !== "freeform" && options?.length) return "multi";
+	return "freeform";
+}
+
+function normalizeIdentifier(raw: unknown, fallback: string, used: Set<string>): string {
+	const base = (typeof raw === "string" ? raw : fallback)
+		.toLowerCase()
+		.trim()
+		.replace(/[^a-z0-9]+/g, "_")
+		.replace(/_+/g, "_")
+		.replace(/^_+|_+$/g, "");
+	let id = base || "question";
+	let suffix = 2;
+	while (used.has(id)) {
+		id = `${base || "question"}_${suffix++}`;
+	}
+	used.add(id);
+	return id;
 }
 
 function sanitizeExtractionResult(value: unknown): ExtractionResult | null {
@@ -211,8 +275,11 @@ function sanitizeExtractionResult(value: unknown): ExtractionResult | null {
 			}
 
 			const questionLike = question as {
+				id?: unknown;
+				header?: unknown;
 				question?: unknown;
 				context?: unknown;
+				type?: unknown;
 				options?: unknown;
 			};
 
@@ -229,14 +296,24 @@ function sanitizeExtractionResult(value: unknown): ExtractionResult | null {
 				typeof questionLike.context === "string" && questionLike.context.trim().length > 0
 					? questionLike.context.trim()
 					: undefined;
+			const options = sanitizeOptions(questionLike.options);
+			const type = sanitizeQuestionType(questionLike.type, options);
 
 			return {
+				id: typeof questionLike.id === "string" ? questionLike.id : undefined,
+				header: typeof questionLike.header === "string" && questionLike.header.trim() ? questionLike.header.trim() : undefined,
 				question: normalizedQuestion,
 				context: normalizedContext,
-				options: sanitizeOptions(questionLike.options),
+				type,
+				options: type === "freeform" ? undefined : options,
 			};
 		})
 		.filter((question): question is ExtractedQuestion => question !== null);
+
+	const usedIds = new Set<string>();
+	for (const question of questions) {
+		question.id = normalizeIdentifier(question.id, question.question, usedIds);
+	}
 
 	return { questions };
 }
@@ -263,6 +340,45 @@ async function selectExtractionModels(currentModel: Model<Api>, modelRegistry: M
 	await maybeAdd("anthropic", HAIKU_MODEL_ID);
 
 	return models;
+}
+
+async function readJson(pathname: string): Promise<Record<string, unknown> | null> {
+	try {
+		return JSON.parse(await fs.readFile(pathname, "utf8")) as Record<string, unknown>;
+	} catch {
+		return null;
+	}
+}
+
+async function loadAnswerSettings(cwd: string): Promise<AnswerSettings> {
+	const [globalSettings, projectSettings] = await Promise.all([
+		readJson(path.join(getAgentDir(), "settings.json")),
+		readJson(path.join(cwd, ".pi", "settings.json")),
+	]);
+	const globalAnswer = (globalSettings?.answer ?? {}) as AnswerSettings;
+	const projectAnswer = (projectSettings?.answer ?? {}) as AnswerSettings;
+	return {
+		systemPrompt: projectAnswer.systemPrompt ?? globalAnswer.systemPrompt,
+		extractionModels: projectAnswer.extractionModels ?? globalAnswer.extractionModels,
+		drafts: { ...globalAnswer.drafts, ...projectAnswer.drafts },
+	};
+}
+
+async function selectConfiguredExtractionModels(currentModel: Model<Api>, modelRegistry: ModelRegistry, settings: AnswerSettings): Promise<Model<Api>[]> {
+	if (!settings.extractionModels?.length) return selectExtractionModels(currentModel, modelRegistry);
+	const models: Model<Api>[] = [];
+	const seen = new Set<string>();
+	for (const preference of settings.extractionModels) {
+		const model = modelRegistry.find(preference.provider, preference.id);
+		if (!model) continue;
+		const key = `${model.provider}:${model.id}`;
+		if (seen.has(key)) continue;
+		const auth = await modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) continue;
+		seen.add(key);
+		models.push(model);
+	}
+	return models.length ? models : selectExtractionModels(currentModel, modelRegistry);
 }
 
 /**
@@ -396,6 +512,7 @@ async function extractQuestionsWithModel(
 	modelRegistry: ModelRegistry,
 	lastAssistantText: string,
 	conversationContext: string,
+	systemPrompt: string,
 	signal: AbortSignal | undefined,
 ): Promise<ExtractionResult> {
 	let lastResponseText = "";
@@ -432,7 +549,7 @@ async function extractQuestionsWithModel(
 									timestamp: Date.now(),
 								},
 							],
-							SYSTEM_PROMPT +
+							systemPrompt +
 								"\n\nIMPORTANT: Return ONLY a valid JSON object. Do not wrap it in markdown. Do not include commentary. Extract questions ONLY from the latest assistant message; prior context is only for disambiguation.",
 							signal,
 						)
@@ -483,6 +600,7 @@ class QnAComponent implements Component {
 	private editor: Editor;
 	private tui: TUI;
 	private onDone: (result: string | null) => void;
+	private onDraftChange?: (answers: string[], selectedOptions: Array<Set<number>>) => void;
 	private showingConfirmation = false;
 
 	// Cache
@@ -497,24 +615,28 @@ class QnAComponent implements Component {
 	private yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
 	private gray = (s: string) => `\x1b[90m${s}\x1b[0m`;
 
-	constructor(questions: ExtractedQuestion[], tui: TUI, onDone: (result: string | null) => void) {
+	constructor(questions: ExtractedQuestion[], tui: TUI, onDone: (result: string | null) => void, initialDraft?: Pick<AnswerDraft, "answers" | "selectedOptions">, onDraftChange?: (answers: string[], selectedOptions: Array<Set<number>>) => void) {
 		this.questions = questions;
-		this.answers = questions.map(() => "");
-		this.selectedOptions = questions.map(() => new Set<number>());
+		this.answers = questions.map((_, index) => initialDraft?.answers[index] ?? "");
+		this.selectedOptions = questions.map((_, index) => new Set<number>(initialDraft?.selectedOptions[index] ?? []));
 		this.tui = tui;
 		this.onDone = onDone;
+		this.onDraftChange = onDraftChange;
 
 		// Create a minimal theme for the editor
 		const editorTheme: EditorTheme = {
 			borderColor: this.dim,
 			selectList: {
-				selectedBg: (s: string) => `\x1b[44m${s}\x1b[0m`,
-				matchHighlight: this.cyan,
-				itemSecondary: this.gray,
+				selectedPrefix: this.cyan,
+				selectedText: (s: string) => `\x1b[44m${s}\x1b[0m`,
+				description: this.gray,
+				scrollInfo: this.dim,
+				noMatch: this.dim,
 			},
 		};
 
 		this.editor = new Editor(tui, editorTheme);
+		this.editor.setText(this.answers[0] || "");
 		// Disable the editor's built-in submit (which clears the editor)
 		// We'll handle Enter ourselves to preserve the text
 		this.editor.disableSubmit = true;
@@ -526,6 +648,7 @@ class QnAComponent implements Component {
 
 	private saveCurrentAnswer(): void {
 		this.answers[this.currentIndex] = this.editor.getText();
+		this.onDraftChange?.(this.answers.slice(), this.selectedOptions.map((set) => new Set(set)));
 	}
 
 	private navigateTo(index: number): void {
@@ -537,6 +660,11 @@ class QnAComponent implements Component {
 	}
 
 	private formatOption(option: ExtractedOption): string {
+		const label = option.label ? `${option.label}) ${option.text}` : option.text;
+		return option.description ? `${label} — ${option.description}` : label;
+	}
+
+	private formatSelectedOption(option: ExtractedOption): string {
 		return option.label ? `${option.label}) ${option.text}` : option.text;
 	}
 
@@ -560,11 +688,14 @@ class QnAComponent implements Component {
 			return false;
 		}
 
-		if (this.editor.getText() !== "" || data.length !== 1) {
+		if (question.type === "freeform" || data.length !== 1) {
 			return false;
 		}
 
-		const matchedIndex = options.findIndex((option) => option.label?.toLowerCase() === data.toLowerCase());
+		const numericIndex = /^[1-9]$/.test(data) ? Number(data) - 1 : -1;
+		const matchedIndex = numericIndex >= 0 && numericIndex < options.length
+			? numericIndex
+			: options.findIndex((option) => option.label?.toLowerCase() === data.toLowerCase());
 		if (matchedIndex === -1) {
 			return false;
 		}
@@ -573,8 +704,27 @@ class QnAComponent implements Component {
 		if (selected.has(matchedIndex)) {
 			selected.delete(matchedIndex);
 		} else {
+			if (question.type === "single") {
+				selected.clear();
+			}
 			selected.add(matchedIndex);
 		}
+		this.onDraftChange?.(this.answers.slice(), this.selectedOptions.map((set) => new Set(set)));
+		this.invalidate();
+		this.tui.requestRender();
+		return true;
+	}
+
+	private moveOptionSelection(delta: number): boolean {
+		const question = this.questions[this.currentIndex];
+		const options = question.options;
+		if (question.type === "freeform" || !options?.length || this.editor.getText() !== "") return false;
+		const selected = this.selectedOptions[this.currentIndex];
+		const current = selected.size ? [...selected].sort((a, b) => a - b)[0] : (delta > 0 ? -1 : options.length);
+		const next = Math.max(0, Math.min(options.length - 1, current + delta));
+		if (question.type === "single") selected.clear();
+		selected.add(next);
+		this.onDraftChange?.(this.answers.slice(), this.selectedOptions.map((set) => new Set(set)));
 		this.invalidate();
 		this.tui.requestRender();
 		return true;
@@ -587,22 +737,25 @@ class QnAComponent implements Component {
 		const parts: string[] = [];
 		for (let i = 0; i < this.questions.length; i++) {
 			const q = this.questions[i];
-			const a = this.answers[i]?.trim() || "(no answer)";
+			const a = this.answers[i]?.trim() || "";
+			const selectedOptionIndexes = [...this.selectedOptions[i]].sort((a, b) => a - b);
+			if (!a && selectedOptionIndexes.length === 0) continue;
 			parts.push(`Q: ${q.question}`);
 			if (q.context) {
 				parts.push(`> ${q.context}`);
 			}
-			const selectedOptionIndexes = [...this.selectedOptions[i]].sort((a, b) => a - b);
 			if (q.options?.length && selectedOptionIndexes.length > 0) {
 				parts.push(selectedOptionIndexes.length === 1 ? "Choice:" : "Choices:");
 				for (const selectedOptionIndex of selectedOptionIndexes) {
 					const selectedOption = q.options[selectedOptionIndex];
 					if (selectedOption) {
-						parts.push(`- ${this.formatOption(selectedOption)}`);
+						parts.push(`- ${this.formatSelectedOption(selectedOption)}`);
 					}
 				}
 			}
-			parts.push(`A: ${a}`);
+			if (a) {
+				parts.push(`A: ${a}`);
+			}
 			parts.push("");
 		}
 
@@ -610,6 +763,7 @@ class QnAComponent implements Component {
 	}
 
 	private cancel(): void {
+		this.saveCurrentAnswer();
 		this.onDone(null);
 	}
 
@@ -656,16 +810,19 @@ class QnAComponent implements Component {
 			return;
 		}
 
-		// Arrow up/down for question navigation when editor is empty
+		// Arrow up/down for question navigation when editor is empty or no freeform editor is active
 		// (Editor handles its own cursor navigation when there's content)
-		if (matchesKey(data, Key.up) && this.editor.getText() === "") {
+		if (matchesKey(data, Key.up) && this.moveOptionSelection(-1)) return;
+		if (matchesKey(data, Key.down) && this.moveOptionSelection(1)) return;
+
+		if (matchesKey(data, Key.up) && (this.questions[this.currentIndex].type !== "freeform" || this.editor.getText() === "")) {
 			if (this.currentIndex > 0) {
 				this.navigateTo(this.currentIndex - 1);
 				this.tui.requestRender();
 				return;
 			}
 		}
-		if (matchesKey(data, Key.down) && this.editor.getText() === "") {
+		if (matchesKey(data, Key.down) && (this.questions[this.currentIndex].type !== "freeform" || this.editor.getText() === "")) {
 			if (this.currentIndex < this.questions.length - 1) {
 				this.navigateTo(this.currentIndex + 1);
 				this.tui.requestRender();
@@ -737,7 +894,7 @@ class QnAComponent implements Component {
 		// Progress indicator
 		const progressParts: string[] = [];
 		for (let i = 0; i < this.questions.length; i++) {
-			const answered = (this.answers[i]?.trim() || "").length > 0;
+			const answered = (this.answers[i]?.trim() || "").length > 0 || this.selectedOptions[i].size > 0;
 			const current = i === this.currentIndex;
 			if (current) {
 				progressParts.push(this.cyan("●"));
@@ -752,6 +909,11 @@ class QnAComponent implements Component {
 
 		// Current question
 		const q = this.questions[this.currentIndex];
+		if (q.header) {
+			for (const line of wrapTextWithAnsi(this.bold(this.cyan(q.header)), contentWidth)) {
+				lines.push(padToWidth(boxLine(line)));
+			}
+		}
 		const questionText = `${this.bold("Q:")} ${q.question}`;
 		const wrappedQuestion = wrapTextWithAnsi(questionText, contentWidth);
 		for (const line of wrappedQuestion) {
@@ -771,7 +933,9 @@ class QnAComponent implements Component {
 		if (q.options?.length) {
 			lines.push(padToWidth(emptyBoxLine()));
 			const selectedOptionIndexes = this.selectedOptions[this.currentIndex];
-			const optionHint = this.dim("Options (press labels while answer is empty; multi-select allowed)");
+			const optionHint = this.dim(q.type === "single"
+				? "Options (press label to choose one; type below for Other)"
+				: "Options (press labels to toggle multiple; type below for Other)");
 			for (const line of wrapTextWithAnsi(optionHint, contentWidth)) {
 				lines.push(padToWidth(boxLine(line)));
 			}
@@ -789,18 +953,20 @@ class QnAComponent implements Component {
 
 		lines.push(padToWidth(emptyBoxLine()));
 
-		// Render the editor component (multi-line input) with padding
-		// Skip the first and last lines (editor's own border lines)
-		const answerPrefix = this.bold("A: ");
-		const editorWidth = contentWidth - 4 - 3; // Extra padding + space for "A: "
-		const editorLines = this.editor.render(editorWidth);
-		for (let i = 1; i < editorLines.length - 1; i++) {
-			if (i === 1) {
-				// First content line gets the "A: " prefix
-				lines.push(padToWidth(boxLine(answerPrefix + editorLines[i])));
-			} else {
-				// Subsequent lines get padding to align with the first line
-				lines.push(padToWidth(boxLine("   " + editorLines[i])));
+		{
+			// Render the editor component (multi-line input) with padding
+			// Skip the first and last lines (editor's own border lines)
+			const answerPrefix = this.bold(q.type === "freeform" ? "A: " : "Other: ");
+			const editorWidth = contentWidth - 4 - 3; // Extra padding + space for "A: "
+			const editorLines = this.editor.render(editorWidth);
+			for (let i = 1; i < editorLines.length - 1; i++) {
+				if (i === 1) {
+					// First content line gets the "A: " prefix
+					lines.push(padToWidth(boxLine(answerPrefix + editorLines[i])));
+				} else {
+					// Subsequent lines get padding to align with the first line
+					lines.push(padToWidth(boxLine("   " + editorLines[i])));
+				}
 			}
 		}
 
@@ -816,7 +982,8 @@ class QnAComponent implements Component {
 			const optionControls = q.options?.length
 				? ` · ${this.dim(this.optionShortcutHint(q))} toggle option(s)`
 				: "";
-			const controls = `${this.dim("Tab/Enter")} next · ${this.dim("Shift+Tab")} prev · ${this.dim("Shift+Enter")} newline${optionControls} · ${this.dim("Esc")} cancel`;
+			const newlineControl = ` · ${this.dim("Shift+Enter")} newline`;
+			const controls = `${this.dim("Tab/Enter")} next · ${this.dim("Shift+Tab")} prev${newlineControl}${optionControls} · ${this.dim("Esc")} cancel`;
 			lines.push(padToWidth(boxLine(truncateToWidth(controls, contentWidth))));
 		}
 		lines.push(padToWidth(this.dim("╰" + horizontalLine(boxWidth - 2) + "╯")));
@@ -858,6 +1025,37 @@ function buildConversationContext(branch: ReturnType<ExtensionContext["sessionMa
 	return contextEntries.join("\n\n---\n\n");
 }
 
+function normalizeComparable(text: string | undefined): string {
+	return (text ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function questionsMatch(left: ExtractedQuestion[] | undefined, right: ExtractedQuestion[] | undefined): boolean {
+	if (!left || !right || left.length !== right.length) return false;
+	return left.every((question, index) => {
+		const other = right[index];
+		const sameId = question.id && other.id && normalizeComparable(question.id) === normalizeComparable(other.id);
+		const sameQuestion = normalizeComparable(question.question) === normalizeComparable(other.question);
+		if (!sameId && !sameQuestion) return false;
+		if (question.type !== other.type) return false;
+		const leftOptions = question.options ?? [];
+		const rightOptions = other.options ?? [];
+		if (leftOptions.length !== rightOptions.length) return false;
+		return leftOptions.every((option, optionIndex) => normalizeComparable(option.text) === normalizeComparable(rightOptions[optionIndex]?.text));
+	});
+}
+
+function findLatestDraft(branch: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>, sourceEntryId: string, questions: ExtractedQuestion[]): AnswerDraft | null {
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i] as { type?: string; customType?: string; data?: unknown };
+		if (entry.type !== "custom" || entry.customType !== "answer:draft") continue;
+		const draft = entry.data as AnswerDraft | undefined;
+		if (!draft || draft.sourceEntryId !== sourceEntryId) continue;
+		if (draft.state === "cleared") return null;
+		return questionsMatch(draft.questions, questions) ? draft : null;
+	}
+	return null;
+}
+
 export default function (pi: ExtensionAPI) {
 	const answerHandler = async (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) {
@@ -871,9 +1069,11 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// Find the last assistant message on the current branch
+		const settings = await loadAnswerSettings(ctx.cwd);
 		const branch = ctx.sessionManager.getBranch();
 		let lastAssistantText: string | undefined;
 		let lastAssistantIndex = -1;
+		let lastAssistantEntryId = "";
 
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
@@ -888,6 +1088,7 @@ export default function (pi: ExtensionAPI) {
 					if (text.length > 0) {
 						lastAssistantText = text;
 						lastAssistantIndex = i;
+						lastAssistantEntryId = String((entry as { id?: unknown }).id ?? i);
 						break;
 					}
 				}
@@ -900,7 +1101,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const conversationContext = buildConversationContext(branch, lastAssistantIndex);
-		const extractionModels = await selectExtractionModels(ctx.model, ctx.modelRegistry);
+		const extractionModels = await selectConfiguredExtractionModels(ctx.model, ctx.modelRegistry, settings);
 
 		// Run extraction with loader UI
 		const extractionOutcome = await ctx.ui.custom<ExtractionOutcome>((tui, theme, _kb, done) => {
@@ -918,6 +1119,7 @@ export default function (pi: ExtensionAPI) {
 						ctx.modelRegistry,
 						lastAssistantText!,
 						conversationContext,
+						settings.systemPrompt ?? SYSTEM_PROMPT,
 						loader.signal,
 					);
 				} catch (error) {
@@ -963,13 +1165,51 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		const draftSettings = { enabled: true, autosaveMs: 1000, promptOnRestore: true, ...settings.drafts };
+		let initialDraft: Pick<AnswerDraft, "answers" | "selectedOptions"> | undefined;
+		const foundDraft = draftSettings.enabled ? findLatestDraft(branch, lastAssistantEntryId, extractionResult.questions) : null;
+		if (foundDraft) {
+			const hasContent = foundDraft.answers.some((answer) => answer.trim()) || foundDraft.selectedOptions.some((indexes) => indexes.length > 0);
+			if (hasContent && (!draftSettings.promptOnRestore || await ctx.ui.confirm("Resume draft answers?", "Saved answers were found for this assistant message. Restore them?"))) {
+				initialDraft = foundDraft;
+			}
+		}
+
+		let draftTimer: ReturnType<typeof setTimeout> | undefined;
+		let pendingDraft: { answers: string[]; selectedOptions: Array<Set<number>> } | undefined;
+		const appendDraft = (answers: string[], selectedOptions: Array<Set<number>>, state: AnswerDraft["state"]) => {
+			(pi as unknown as { appendEntry?: (customType: string, data: unknown) => void }).appendEntry?.("answer:draft", {
+				version: 1,
+				sourceEntryId: lastAssistantEntryId,
+				questions: extractionResult.questions,
+				answers,
+				selectedOptions: selectedOptions.map((set) => [...set]),
+				state,
+				updatedAt: Date.now(),
+			} satisfies AnswerDraft);
+		};
+		const scheduleDraft = (answers: string[], selectedOptions: Array<Set<number>>) => {
+			if (!draftSettings.enabled) return;
+			pendingDraft = { answers, selectedOptions };
+			if (draftTimer) clearTimeout(draftTimer);
+			draftTimer = setTimeout(() => appendDraft(answers, selectedOptions, "draft"), draftSettings.autosaveMs);
+		};
+
 		// Show the Q&A component
 		const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
-			return new QnAComponent(extractionResult.questions, tui, done);
+			return new QnAComponent(extractionResult.questions, tui, done, initialDraft, scheduleDraft);
 		});
+		if (draftTimer) clearTimeout(draftTimer);
 
 		if (answersResult === null) {
+			if (pendingDraft) appendDraft(pendingDraft.answers, pendingDraft.selectedOptions, "draft");
 			ctx.ui.notify("Cancelled", "info");
+			return;
+		}
+
+		appendDraft([], [], "cleared");
+		if (answersResult.trim().length === 0) {
+			ctx.ui.notify("No answers provided", "info");
 			return;
 		}
 
