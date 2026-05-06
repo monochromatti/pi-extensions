@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "echo 'nothing to build'",
-    "check": "echo 'no checks configured yet'"
+    "check": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --skipLibCheck index.ts"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": ">=0.70.0",

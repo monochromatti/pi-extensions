@@ -167,7 +167,7 @@ export default function zedContextExtension(pi: ExtensionAPI) {
 		],
 		parameters: TOOL_PARAMS,
 		async execute(_toolCallId, params: ZedContextParams, signal, onUpdate, ctx) {
-			onUpdate?.({ content: [{ type: "text", text: "Reading Zed active editor state..." }] });
+			onUpdate?.({ content: [{ type: "text", text: "Reading Zed active editor state..." }], details: undefined });
 			const result = await readZedContext(ctx.cwd, params, signal);
 			if (result.ok === false) throw new Error(result.error);
 

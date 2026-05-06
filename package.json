@@ -19,7 +19,10 @@
     ]
   },
   "scripts": {
-    "check": "npm run -ws --if-present check",
-    "build": "npm run -ws --if-present build"
+    "check": "npm run --workspaces --if-present check",
+    "build": "npm run --workspaces --if-present build"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
   }
 }
