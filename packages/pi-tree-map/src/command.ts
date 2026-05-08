@@ -1,4 +1,4 @@
-import { BorderedLoader, type ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { BorderedLoader, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { buildTreeMapModel } from "./build-graph.js";
 import { FILTER_MODES, LABEL_MODES } from "./constants.js";
 import { layoutTree } from "./layout.js";

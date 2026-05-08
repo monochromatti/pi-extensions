@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { COMMAND_NAME } from "./src/constants.js";
 import { openTreeMap } from "./src/command.js";
 

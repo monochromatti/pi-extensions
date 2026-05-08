@@ -1,4 +1,4 @@
-import type { Theme } from "@mariozechner/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { FOOTER_TEXT } from "./constants.js";
 import { compactWhitespace, truncate, visibleLength } from "./text.js";
 import type { MapNode, TreeMapModel } from "./model.js";

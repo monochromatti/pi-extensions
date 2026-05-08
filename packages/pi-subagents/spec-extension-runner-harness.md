@@ -4,7 +4,7 @@
 
 `packages/pi-subagents/test/integration/intercom-live.test.ts` currently uses a custom `createHarness()` fake Pi API to register tools, emit lifecycle events, and capture messages. This gives useful coverage, but it does not exercise upstream Pi extension loading and runner semantics.
 
-Replace this homegrown harness with a test harness built on `@mariozechner/pi-coding-agent`'s exported extension runtime primitives:
+Replace this homegrown harness with a test harness built on `@earendil-works/pi-coding-agent`'s exported extension runtime primitives:
 
 - `discoverAndLoadExtensions`
 - `createEventBus`
@@ -187,10 +187,10 @@ import {
   ExtensionRunner,
   type ExtensionContext,
   type ToolDefinition,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 ```
 
-If type imports differ, inspect `node_modules/@mariozechner/pi-coding-agent/dist/index.d.ts` and adjust.
+If type imports differ, inspect `node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts` and adjust.
 
 ### Step 2: Replace `createHarness()` internals
 
@@ -315,7 +315,7 @@ Keep `withChildEnv` and shared temp `HOME`/`USERPROFILE` isolation. Ensure env c
 
 ### Avoid import cycles
 
-Import upstream from public package root `@mariozechner/pi-coding-agent`, not deep `dist/core/...`, unless public root lacks necessary types. Runtime APIs are public exports.
+Import upstream from public package root `@earendil-works/pi-coding-agent`, not deep `dist/core/...`, unless public root lacks necessary types. Runtime APIs are public exports.
 
 ## Success Criteria
 

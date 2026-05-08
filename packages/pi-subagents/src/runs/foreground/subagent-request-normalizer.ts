@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { AgentConfig } from "../../agents/agents.ts";
 import { validateSubagentParams } from "../../extension/schemas.ts";
 import { applyForceTopLevelAsyncOverride } from "../background/top-level-async.ts";

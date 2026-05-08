@@ -10,14 +10,14 @@
  * 4. Submits the compiled answers when done
  */
 
-import { complete, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
+import { complete, type Api, type Model, type UserMessage } from "@earendil-works/pi-ai";
 import {
 	BorderedLoader,
 	type ExtensionAPI,
 	type ExtensionContext,
 	getAgentDir,
 	type ModelRegistry,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
@@ -30,7 +30,7 @@ import {
 	type TUI,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 // Structured output format for question extraction
 interface ExtractedOption {

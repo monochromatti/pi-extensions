@@ -1,5 +1,5 @@
-import type { Theme } from "@mariozechner/pi-coding-agent";
-import { matchesKey } from "@mariozechner/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { FOOTER_TEXT } from "./constants.js";
 import { moveSelection } from "./navigation.js";
 import { getTreeMapThemeSignature, renderTreeMap, type CameraState } from "./render-canvas.js";

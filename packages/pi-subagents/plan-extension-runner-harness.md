@@ -1,6 +1,6 @@
 # Implementation plan for extension-runner-harness
 
-Replace the custom fake Pi extension harness in `intercom-live.test.ts` with a harness built on upstream `@mariozechner/pi-coding-agent` extension runtime primitives. The goal is not full end-to-end Pi execution. The goal is better mocked session tests: real extension loading, real lifecycle dispatch, real context creation, and real registered-tool lookup through `ExtensionRunner`, while keeping broker/model/session behavior deterministic and mocked.
+Replace the custom fake Pi extension harness in `intercom-live.test.ts` with a harness built on upstream `@earendil-works/pi-coding-agent` extension runtime primitives. The goal is not full end-to-end Pi execution. The goal is better mocked session tests: real extension loading, real lifecycle dispatch, real context creation, and real registered-tool lookup through `ExtensionRunner`, while keeping broker/model/session behavior deterministic and mocked.
 
 ## Relevant files
 
@@ -41,7 +41,7 @@ If applicable, update the Notes section with lessons, discoveries and design cho
   - [x] 3.2 GREEN: Fill only missing mocked runtime/context actions needed for send delivery (`sendMessage`, `appendEntry`, `getSessionName`, `isIdle`, `getSignal`, etc.).
   - [x] 3.3 RED: Run ask/reply tests (`ask waits for reply tool response`, `ask reply includes attachment formatting`) against the runner harness.
   - [x] 3.4 GREEN: Preserve `sentMessages`, `entries`, and session identity behavior so ask/reply assertions pass without weakening assertions.
-  - [x] 3.5 REFACTOR: Keep harness types narrow and local; prefer public upstream imports from `@mariozechner/pi-coding-agent` over deep `dist/` imports.
+  - [x] 3.5 REFACTOR: Keep harness types narrow and local; prefer public upstream imports from `@earendil-works/pi-coding-agent` over deep `dist/` imports.
 
 - [x] 4.0 Preserve child-session `contact_supervisor` behavior through upstream lifecycle
   - [x] 4.1 RED: Add or update assertion that a child-env started session exposes `contact_supervisor` via `runner.getToolDefinition("contact_supervisor")`.

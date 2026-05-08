@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createEventBus, discoverAndLoadExtensions, ExtensionRunner } from "@mariozechner/pi-coding-agent";
+import { createEventBus, discoverAndLoadExtensions, ExtensionRunner } from "@earendil-works/pi-coding-agent";
 
 const packageDir = process.cwd().endsWith(path.join("packages", "pi-subagents"))
 	? process.cwd()

@@ -14,8 +14,8 @@
     "check": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --skipLibCheck index.ts"
   },
   "peerDependencies": {
-    "@mariozechner/pi-ai": ">=0.66.0",
-    "@mariozechner/pi-coding-agent": ">=0.66.0",
-    "@mariozechner/pi-tui": ">=0.66.0"
+    "@earendil-works/pi-ai": ">=0.66.0",
+    "@earendil-works/pi-coding-agent": ">=0.66.0",
+    "@earendil-works/pi-tui": ">=0.66.0"
   }
 }
