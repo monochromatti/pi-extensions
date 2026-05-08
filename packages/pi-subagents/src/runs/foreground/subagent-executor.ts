@@ -654,6 +654,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			task: params.context === "fork" ? wrapForkTask(task.task) : task.task,
 			cwd: task.cwd,
 			...(modelOverrides[index] ? { model: modelOverrides[index] } : {}),
+			...(task.thinking ? { thinking: task.thinking } : {}),
 			...(skillOverrides[index] !== undefined ? { skill: skillOverrides[index] } : {}),
 			...(task.output === true ? (agentConfigs[index]?.output ? { output: agentConfigs[index]!.output } : {}) : task.output !== undefined ? { output: task.output } : {}),
 			...(task.outputMode !== undefined ? { outputMode: task.outputMode } : {}),
@@ -742,6 +743,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			output: effectiveOutput,
 			outputMode: effectiveOutputMode,
 			modelOverride,
+			thinkingOverride: params.thinking ?? a.thinking,
 			maxSubagentDepth,
 			controlConfig,
 			controlIntercomTarget,
@@ -878,6 +880,7 @@ interface ForegroundParallelRunInput {
 	maxSubagentDepths: number[];
 	availableModels: ModelInfo[];
 	modelOverrides: (string | undefined)[];
+	thinkingOverrides: (string | undefined)[];
 	behaviors: Array<ReturnType<typeof resolveStepBehavior>>;
 	firstProgressIndex: number;
 	controlConfig: ResolvedControlConfig;
@@ -976,6 +979,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			intercomSessionName: input.childIntercomTarget?.(task.agent, index),
 			orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 			modelOverride: input.modelOverrides[index],
+			thinkingOverride: input.thinkingOverrides[index],
 			availableModels: input.availableModels,
 			preferredModelProvider: input.ctx.model?.provider,
 			skills: effectiveSkills === false ? [] : effectiveSkills,
@@ -1086,6 +1090,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		...(task.progress !== undefined ? { progress: task.progress } : {}),
 		...(skillOverrides[index] !== undefined ? { skills: skillOverrides[index] } : {}),
 		...(task.model ? { model: task.model } : {}),
+		...(task.thinking ? { thinking: task.thinking } : {}),
 	}));
 	const modelOverrides: (string | undefined)[] = tasks.map((_, i) =>
 		resolveModelCandidate(behaviorOverrides[i]?.model ?? agentConfigs[i]?.model, availableModels, currentProvider),
@@ -1136,6 +1141,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			paramsCwd: effectiveCwd,
 			availableModels,
 			modelOverrides,
+			thinkingOverrides: behaviors.map((behavior) => behavior.thinking),
 			behaviors,
 			firstProgressIndex: parallelProgressPrecreated ? -1 : firstProgressIndex,
 			controlConfig,
@@ -1257,6 +1263,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		availableModels,
 		currentProvider,
 	);
+	const thinkingOverride = params.thinking ?? agentConfig.thinking;
 	let skillOverride: string[] | false | undefined = normalizeSkillInput(params.skill);
 	const rawOutput = params.output !== undefined ? params.output : agentConfig.output;
 	let effectiveOutput: string | false | undefined = rawOutput === true ? agentConfig.output : (rawOutput as string | false | undefined);
@@ -1340,6 +1347,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 		index: 0,
 		modelOverride,
+		thinkingOverride,
 		availableModels,
 		preferredModelProvider: currentProvider,
 		skills: effectiveSkills,

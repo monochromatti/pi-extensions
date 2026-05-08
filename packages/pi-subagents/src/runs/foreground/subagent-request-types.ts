@@ -11,6 +11,7 @@ export interface TaskParam {
 	reads?: string[] | boolean;
 	progress?: boolean;
 	model?: string;
+	thinking?: string;
 	skill?: string | string[] | boolean;
 }
 
@@ -35,6 +36,7 @@ export interface SubagentParamsLike {
 	maxOutput?: MaxOutputConfig;
 	includeProgress?: boolean;
 	model?: string;
+	thinking?: string;
 	skill?: string | string[] | boolean;
 	output?: string | boolean;
 	outputMode?: "inline" | "file-only";

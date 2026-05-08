@@ -68,6 +68,7 @@ const ParallelTaskSchema = Type.Object({
 	reads: Type.Optional(ReadsOverride),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Model override for this task" })),
+	thinking: Type.Optional(Type.String({ description: "Thinking override for this task" })),
 });
 
 const ChainParallelTaskSchema = Type.Object({
@@ -80,6 +81,7 @@ const ChainParallelTaskSchema = Type.Object({
 	reads: Type.Optional(ReadsOverride),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Model override for this task" })),
+	thinking: Type.Optional(Type.String({ description: "Thinking override for this task" })),
 });
 
 const ChainStepSchema = Type.Object({
@@ -91,6 +93,7 @@ const ChainStepSchema = Type.Object({
 	reads: Type.Optional(ReadsOverride),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Model override for this step" })),
+	thinking: Type.Optional(Type.String({ description: "Thinking override for this step" })),
 	parallel: Type.Optional(Type.Array(ChainParallelTaskSchema, { minItems: 1, description: "Tasks to run concurrently in this step" })),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Max concurrent tasks for this step" })),
 	failFast: Type.Optional(Type.Boolean({ description: "Stop this step on first task failure" })),
@@ -122,6 +125,7 @@ export const SubagentParams = Type.Object({
 	outputMode: Type.Optional(OutputModeOverride),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Model override for single mode" })),
+	thinking: Type.Optional(Type.String({ description: "Thinking override for single mode" })),
 });
 
 export interface SubagentValidationResult {

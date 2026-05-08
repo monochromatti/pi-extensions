@@ -97,10 +97,17 @@ export interface AgentConfig {
 
 interface SubagentSettings {
 	overrides: Record<string, BuiltinAgentOverrideConfig>;
+	agents: Record<string, AgentModelConfig>;
 	disableBuiltins?: boolean;
 }
 
-const EMPTY_SUBAGENT_SETTINGS: SubagentSettings = { overrides: {} };
+const EMPTY_SUBAGENT_SETTINGS: SubagentSettings = { overrides: {}, agents: {} };
+
+interface AgentModelConfig {
+	model?: string | false;
+	fallbackModels?: string[] | false;
+	thinking?: string | false;
+}
 
 interface AgentDiscoveryResult {
 	agents: AgentConfig[];
@@ -326,6 +333,34 @@ function parseBuiltinOverrideEntry(
 	return Object.keys(override).length > 0 ? override : undefined;
 }
 
+function parseAgentModelConfigEntry(
+	name: string,
+	value: unknown,
+	filePath: string,
+): AgentModelConfig | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(`Agent config '${name}' in '${filePath}' must be an object.`);
+	}
+
+	const input = value as Record<string, unknown>;
+	const config: AgentModelConfig = {};
+
+	if ("model" in input) {
+		if (typeof input.model === "string" || input.model === false) config.model = input.model;
+		else throw new Error(`Agent config '${name}' in '${filePath}' has invalid 'model'; expected a string or false.`);
+	}
+
+	if ("thinking" in input) {
+		if (typeof input.thinking === "string" || input.thinking === false) config.thinking = input.thinking;
+		else throw new Error(`Agent config '${name}' in '${filePath}' has invalid 'thinking'; expected a string or false.`);
+	}
+
+	const fallbackModels = parseOverrideStringArrayOrFalse(input.fallbackModels, { filePath, name, field: "fallbackModels" });
+	if (fallbackModels !== undefined) config.fallbackModels = fallbackModels;
+
+	return Object.keys(config).length > 0 ? config : undefined;
+}
+
 function readSubagentSettings(filePath: string | null): SubagentSettings {
 	if (!filePath) return EMPTY_SUBAGENT_SETTINGS;
 	const settings = readSettingsFileStrict(filePath);
@@ -343,15 +378,31 @@ function readSubagentSettings(filePath: string | null): SubagentSettings {
 	}
 
 	const parsed: Record<string, BuiltinAgentOverrideConfig> = {};
+	const parsedAgents: Record<string, AgentModelConfig> = {};
+	const agentSettings = subagentsObject.agents;
+	if (agentSettings && typeof agentSettings === "object" && !Array.isArray(agentSettings)) {
+		for (const [name, value] of Object.entries(agentSettings)) {
+			const config = parseAgentModelConfigEntry(name, value, filePath);
+			if (config) parsedAgents[name] = config;
+		}
+	}
 	const agentOverrides = subagentsObject.agentOverrides;
 	if (!agentOverrides || typeof agentOverrides !== "object" || Array.isArray(agentOverrides)) {
-		return { overrides: parsed, disableBuiltins };
+		return { overrides: parsed, agents: parsedAgents, disableBuiltins };
 	}
 	for (const [name, value] of Object.entries(agentOverrides)) {
 		const override = parseBuiltinOverrideEntry(name, value, filePath);
 		if (override) parsed[name] = override;
 	}
-	return { overrides: parsed, disableBuiltins };
+	return { overrides: parsed, agents: parsedAgents, disableBuiltins };
+}
+
+function applyAgentModelConfig(agent: AgentConfig, config: AgentModelConfig): AgentConfig {
+	const next: AgentConfig = { ...agent };
+	if (config.model !== undefined) next.model = config.model === false ? undefined : config.model;
+	if (config.fallbackModels !== undefined) next.fallbackModels = config.fallbackModels === false ? undefined : [...config.fallbackModels];
+	if (config.thinking !== undefined) next.thinking = config.thinking === false ? undefined : config.thinking;
+	return next;
 }
 
 function applyBuiltinOverride(
@@ -396,6 +447,14 @@ function applyBuiltinOverrides(
 	const userBulkDisabled = projectSettings.disableBuiltins === undefined && userSettings.disableBuiltins === true;
 
 	return builtinAgents.map((agent) => {
+		const projectAgentConfig = projectSettings.agents[agent.name];
+		if (projectAgentConfig && projectSettingsPath) {
+			agent = applyAgentModelConfig(agent, projectAgentConfig);
+		} else {
+			const userAgentConfig = userSettings.agents[agent.name];
+			if (userAgentConfig) agent = applyAgentModelConfig(agent, userAgentConfig);
+		}
+
 		const projectOverride = projectSettings.overrides[agent.name];
 		if (projectOverride && projectSettingsPath) {
 			return applyBuiltinOverride(agent, projectOverride, { scope: "project", path: projectSettingsPath });
@@ -414,6 +473,16 @@ function applyBuiltinOverrides(
 			return applyBuiltinOverride(agent, { disabled: true }, { scope: "user", path: userSettingsPath });
 		}
 
+		return agent;
+	});
+}
+
+function applySettingsAgentConfigs(agents: AgentConfig[], userSettings: SubagentSettings, projectSettings: SubagentSettings): AgentConfig[] {
+	return agents.map((agent) => {
+		const projectConfig = projectSettings.agents[agent.name];
+		if (projectConfig) return applyAgentModelConfig(agent, projectConfig);
+		const userConfig = userSettings.agents[agent.name];
+		if (userConfig) return applyAgentModelConfig(agent, userConfig);
 		return agent;
 	});
 }
@@ -686,9 +755,12 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	const userAgents = [...userAgentsOld, ...userAgentsNew];
 
 	const projectAgents = scope === "user" ? [] : projectAgentDirs.flatMap((dir) => loadAgentsFromDir(dir, "project"));
-	const agents = mergeAgentsForScope(scope, userAgents, projectAgents, builtinAgents)
+	const agents = applySettingsAgentConfigs(
+		mergeAgentsForScope(scope, userAgents, projectAgents, builtinAgents),
+		userSettings,
+		projectSettings,
+	)
 		.filter((agent) => agent.disabled !== true);
 
 	return { agents, projectAgentsDir };
 }
-

@@ -474,6 +474,8 @@ export interface RunSyncOptions {
 	maxSubagentDepth?: number;
 	/** Override the agent's default model (format: "provider/id" or just "id") */
 	modelOverride?: string;
+	/** Override the agent's default thinking level (off|minimal|low|medium|high|xhigh) */
+	thinkingOverride?: string;
 	/** Registry models available for heuristic bare-model resolution */
 	availableModels?: Array<{ provider: string; id: string; fullId: string }>;
 	/** Current parent-session provider to prefer for ambiguous bare model ids */

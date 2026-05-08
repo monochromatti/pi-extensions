@@ -63,6 +63,7 @@ export interface NormalizedSingleRunRequest extends NormalizedRunBaseRequest {
 	agent: string;
 	task: string;
 	model?: string;
+	thinking?: string;
 	skill?: string | string[] | boolean;
 	output?: string | boolean;
 	outputMode?: "inline" | "file-only";
@@ -220,5 +221,5 @@ export function validateSubagentRunRequest(input: { shape: NormalizedRunShape; e
 	const base = { ...input.shape, kind: "run" as const, params, effectiveCwd: params.cwd ?? input.shape.requestedCwd, context: params.context, control: params.control, sessionDir: params.sessionDir, maxOutput: params.maxOutput, includeProgress: params.includeProgress };
 	if (hasTasks) return { ok: true, request: { ...base, mode: "parallel", tasks: params.tasks!, concurrency: params.concurrency } };
 	if (hasChain) return { ok: true, request: { ...base, mode: "chain", chain: params.chain!, task: params.task, skill: params.skill } };
-	return { ok: true, request: { ...base, mode: "single", agent: params.agent!, task: params.task ?? "", model: params.model, skill: params.skill, output: params.output, outputMode: params.outputMode } };
+	return { ok: true, request: { ...base, mode: "single", agent: params.agent!, task: params.task ?? "", model: params.model, thinking: params.thinking, skill: params.skill, output: params.output, outputMode: params.outputMode } };
 }

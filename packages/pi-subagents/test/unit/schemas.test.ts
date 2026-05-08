@@ -28,6 +28,7 @@ test("2.1/2.2 accepts reduced single mode", () => {
     outputMode: "file-only",
     skill: ["pi-subagents"],
     model: "anthropic/claude-sonnet-4",
+    thinking: "high",
   });
   assertValid({ agent: "planner" });
 });
@@ -35,7 +36,7 @@ test("2.1/2.2 accepts reduced single mode", () => {
 test("2.3/2.4 accepts reduced parallel mode", () => {
   assertValid({
     tasks: [
-      { agent: "researcher", task: "research", reads: ["README.md"], output: "research.md", skill: "pi-subagents", model: "google/gemini-3-pro" },
+      { agent: "researcher", task: "research", reads: ["README.md"], output: "research.md", skill: "pi-subagents", model: "google/gemini-3-pro", thinking: "medium" },
       { agent: "reviewer", task: "review", count: 2, outputMode: "inline" },
     ],
     concurrency: 2,
@@ -56,7 +57,7 @@ test("2.5/2.6 accepts reduced chain mode with sequential and embedded parallel s
         concurrency: 2,
         failFast: false,
       },
-      { agent: "worker", task: "Implement from {previous}", skill: false, model: "anthropic/claude-sonnet-4" },
+      { agent: "worker", task: "Implement from {previous}", skill: false, model: "anthropic/claude-sonnet-4", thinking: "low" },
     ],
     context: "fork",
   });

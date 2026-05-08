@@ -149,7 +149,7 @@ async function runSingleAttempt(
 		},
 		capabilities: {
 			model,
-			thinking: agent.thinking,
+			thinking: options.thinkingOverride ?? agent.thinking,
 			systemPromptMode: agent.systemPromptMode,
 			tools: agent.tools,
 			extensions: agent.extensions,

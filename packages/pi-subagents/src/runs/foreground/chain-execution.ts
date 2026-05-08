@@ -242,6 +242,7 @@ async function runChainChild(input: {
 		outputPath: prepared.outputPath,
 		outputMode: behavior.outputMode,
 		modelOverride: effectiveModel,
+		thinkingOverride: behavior.thinking,
 		availableModels,
 		preferredModelProvider: params.ctx.model?.provider,
 		skills: behavior.skills === false ? [] : behavior.skills ?? [],
@@ -319,6 +320,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				progress: false,
 				skills: normalizeSkillInput(step.skill),
 				model: step.model,
+				thinking: step.thinking,
 			}, chainSkills);
 			const template = step.task ?? (stepIndex === 0 ? originalTask : "{previous}");
 			const rendered = renderChainTaskTemplate(template, originalTask, previous);

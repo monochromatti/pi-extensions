@@ -98,6 +98,7 @@ interface AsyncSingleParams {
 	output?: string | false;
 	outputMode?: "inline" | "file-only";
 	modelOverride?: string;
+	thinkingOverride?: string;
 	availableModels?: AvailableModelInfo[];
 	maxSubagentDepth: number;
 	controlConfig?: ResolvedControlConfig;
@@ -247,6 +248,7 @@ export function executeAsyncChain(
 			...(s.progress !== undefined ? { progress: s.progress } : {}),
 			...(stepSkillInput !== undefined ? { skills: stepSkillInput } : {}),
 			...(s.model ? { model: s.model } : {}),
+			...(s.thinking ? { thinking: s.thinking } : {}),
 		};
 	};
 	const buildSeqStep = (s: SequentialStep, sessionFile?: string, resolvedBehavior?: ResolvedStepBehavior) => {
@@ -276,9 +278,9 @@ export function executeAsyncChain(
 			agent: s.agent,
 			task,
 			cwd: stepCwd,
-			model: applyThinkingSuffix(primaryModel, a.thinking),
+			model: applyThinkingSuffix(primaryModel, behavior.thinking),
 			modelCandidates: buildModelCandidates(behavior.model ?? a.model, a.fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
-				applyThinkingSuffix(candidate, a.thinking),
+				applyThinkingSuffix(candidate, behavior.thinking),
 			),
 			tools: a.tools,
 			extensions: a.extensions,
@@ -478,9 +480,9 @@ export function executeAsyncSingle(
 						agent,
 						task: taskWithOutputInstruction,
 						cwd: runnerCwd,
-						model: applyThinkingSuffix(resolveModelCandidate(params.modelOverride ?? agentConfig.model, availableModels, ctx.currentModelProvider), agentConfig.thinking),
+						model: applyThinkingSuffix(resolveModelCandidate(params.modelOverride ?? agentConfig.model, availableModels, ctx.currentModelProvider), params.thinkingOverride ?? agentConfig.thinking),
 						modelCandidates: buildModelCandidates(params.modelOverride ?? agentConfig.model, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
-							applyThinkingSuffix(candidate, agentConfig.thinking),
+							applyThinkingSuffix(candidate, params.thinkingOverride ?? agentConfig.thinking),
 						),
 						tools: agentConfig.tools,
 						extensions: agentConfig.extensions,

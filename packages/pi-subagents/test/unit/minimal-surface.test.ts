@@ -16,9 +16,9 @@ test("package manifest exposes extension and skill without prompts", () => {
   assert.ok(!pkg.files.some((entry: string) => entry.includes("banner")));
 });
 
-test("only minimal built-in agents ship", () => {
+test("builtin agents ship expected set", () => {
   const agents = fs.readdirSync(path.join(root, "agents")).filter((name) => name.endsWith(".md")).sort();
-  assert.deepEqual(agents, ["planner.md", "researcher.md", "reviewer.md", "worker.md"]);
+  assert.deepEqual(agents, ["delegate.md", "oracle.md", "planner.md", "researcher.md", "reviewer.md", "worker.md"]);
 });
 
 test("subagent public description omits removed features", () => {

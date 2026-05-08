@@ -59,6 +59,48 @@ intercom({ action: "ask", to: "session-name", message: "Need decision" })
 intercom({ action: "reply", message: "Approved" })
 ```
 
+## Settings JSON model configuration
+
+Use `~/.pi/agent/settings.json` (user) or `.pi/settings.json` (project).
+
+```json
+{
+  "subagents": {
+    "agents": {
+      "worker": {
+        "model": "openai-codex/gpt-5.5-codex",
+        "thinking": "high",
+        "fallbackModels": ["anthropic/claude-sonnet-4-5"]
+      },
+      "researcher": {
+        "thinking": "medium"
+      }
+    },
+    "agentOverrides": {
+      "oracle": {
+        "model": "openai-codex/gpt-5.5-codex",
+        "thinking": "high"
+      }
+    }
+  }
+}
+```
+
+Notes:
+- `subagents.agents` applies model/thinking/fallback config to any discovered agent name.
+- `subagents.agentOverrides` remains builtin-agent override path.
+- Project settings override user settings.
+
+## Runtime model/thinking overrides
+
+Supervisor can override at invocation time:
+
+```js
+subagent({ agent: "worker", task: "Implement fix", model: "anthropic/claude-sonnet-4-5", thinking: "low" })
+```
+
+Also supported on parallel tasks and chain steps (`tasks[i].thinking`, `chain[i].thinking`, `chain[i].parallel[j].thinking`).
+
 ## Not supported
 
 This package intentionally omits prompt shortcuts, chain files, shared chain directories, agent management actions, clarify TUI, and worktree mode.
