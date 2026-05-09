@@ -4,7 +4,6 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, type AgentScope } from "../../agents/agents.ts";
-import { getArtifactsDir } from "../../shared/artifacts.ts";
 import { toModelInfo, type ModelInfo } from "../../shared/model-info.ts";
 import { executeChain } from "./chain-execution.ts";
 import { clearPendingForegroundControlNotices } from "../../extension/control-notices.ts";
@@ -38,7 +37,9 @@ import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
 import { formatControlIntercomMessage, formatControlNoticeMessage, resolveControlConfig, shouldNotifyControlEvent } from "../shared/subagent-control.ts";
 import { finalizeSingleOutput, injectSingleOutputInstruction, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
-import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readStatus, resolveChildCwd } from "../../shared/utils.ts";
+import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, resolveChildCwd } from "../../shared/utils.ts";
+import { readStatus } from "../background/status-store.ts";
+import { buildRunPlan } from "../plan/run-plan.ts";
 import {
 	buildSubagentResultIntercomPayload,
 	deliverSubagentIntercomMessageEvent,
@@ -1518,7 +1519,6 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		if (!normalizedRun.ok) return normalizedRun.result;
 		const runRequest = normalizedRun.request;
 		effectiveParams = runRequest.params;
-		const runId = randomUUID().slice(0, 8);
 		const shareEnabled = runRequest.shareEnabled;
 		const hasChain = runRequest.mode === "chain";
 		const hasTasks = runRequest.mode === "parallel";
@@ -1529,23 +1529,29 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		} catch (error) {
 			return toExecutionErrorResult(effectiveParams, error);
 		}
-		const requestedAsync = effectiveParams.async ?? deps.asyncByDefault;
+		const runPlan = buildRunPlan({
+			mode: runRequest.mode,
+			params: effectiveParams,
+			effectiveCwd,
+			agents,
+			config: deps.config,
+			asyncByDefault: deps.asyncByDefault,
+			asyncAvailable: isAsyncAvailable(),
+			parentSessionFile,
+			tempArtifactsDir: deps.tempArtifactsDir,
+			getSubagentSessionRoot: deps.getSubagentSessionRoot,
+			expandTilde: deps.expandTilde,
+			sessionFileFromContext: sessionFileForIndex,
+		});
+		const runId = runPlan.runId;
 		const backgroundRequestedWhileClarifying = false;
-		const effectiveAsync = requestedAsync;
-		const controlConfig = resolveControlConfig(deps.config.control, effectiveParams.control);
-
-		const artifactConfig: ArtifactConfig = { ...DEFAULT_ARTIFACT_CONFIG };
-		const artifactsDir = effectiveAsync ? deps.tempArtifactsDir : getArtifactsDir(parentSessionFile);
-
-		let sessionRoot: string;
-		if (effectiveParams.sessionDir) {
-			sessionRoot = path.resolve(deps.expandTilde(effectiveParams.sessionDir));
-		} else {
-			const baseSessionRoot = deps.config.defaultSessionDir
-				? path.resolve(deps.expandTilde(deps.config.defaultSessionDir))
-				: deps.getSubagentSessionRoot(parentSessionFile);
-			sessionRoot = path.join(baseSessionRoot, runId);
-		}
+		const effectiveAsync = runPlan.asyncMode.effectiveAsync;
+		const controlConfig = runPlan.controlConfig;
+		const artifactConfig = runPlan.artifactConfig;
+		const artifactsDir = runPlan.artifactsDir;
+		const sessionRoot = runPlan.session.root;
+		const sessionDirForIndex = runPlan.session.dirForIndex;
+		const childSessionFileForIndex = runPlan.session.fileForIndex;
 		try {
 			fs.mkdirSync(sessionRoot, { recursive: true });
 		} catch (error) {
@@ -1555,10 +1561,6 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				new Error(`Failed to create session directory '${sessionRoot}': ${message}`),
 			);
 		}
-		const sessionDirForIndex = (idx?: number) =>
-			path.join(sessionRoot, `run-${idx ?? 0}`);
-		const childSessionFileForIndex = (idx?: number) =>
-			sessionFileForIndex(idx) ?? path.join(sessionDirForIndex(idx), "session.jsonl");
 
 		const onUpdateWithContext = onUpdate
 			? (r: AgentToolResult<Details>) => onUpdate(withForkContext(r, effectiveParams.context))

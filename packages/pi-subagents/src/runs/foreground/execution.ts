@@ -6,12 +6,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "../../agents/agents.ts";
-import {
-	ensureArtifactsDir,
-	getArtifactPaths,
-	writeArtifact,
-	writeMetadata,
-} from "../../shared/artifacts.ts";
+import { createRunArtifacts } from "../shared/run-artifacts.ts";
 import {
 	type AgentProgress,
 	type ArtifactPaths,
@@ -32,20 +27,17 @@ import {
 	deriveActivityState,
 	shouldNotifyControlEvent,
 } from "../shared/subagent-control.ts";
-import {
-	getFinalOutput,
-	findLatestSessionFile,
-	detectSubagentError,
-	extractToolArgsPreview,
-	extractTextFromContent,
-} from "../../shared/utils.ts";
+import { findLatestSessionFile } from "../../shared/utils.ts";
+import { extractTextFromContent, getFinalOutput } from "../../shared/messages.ts";
+import { extractToolArgsPreview } from "../../shared/tool-preview.ts";
 import { buildSkillInjection, resolveSkillsWithFallback } from "../../agents/skills.ts";
-import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
+import { classifyChildRunResult } from "../shared/result-classifier.ts";
 import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { prepareChildRun } from "../shared/child-run-preparation.ts";
-import { captureSingleOutputSnapshot, formatSavedOutputReference, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
+import { captureSingleOutputSnapshot, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
+import { finalizeChildOutput } from "../shared/output-finalizer.ts";
 import {
 	buildModelCandidates,
 	formatModelAttemptNote,
@@ -204,6 +196,7 @@ async function runSingleAttempt(
 	result.progress = progress;
 	const spawnEnv = prepared.spawnEnv;
 	let observedMutationAttempt = false;
+	let stderrOutput = "";
 
 	const exitCode = await new Promise<number>((resolve) => {
 		const spawnSpec = getPiSpawnCommand(prepared.args);
@@ -555,10 +548,8 @@ async function runSingleAttempt(
 			}
 			processClosed = true;
 			if (buf.trim()) processLine(buf);
+			stderrOutput = stderrBuf;
 			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !result.error;
-			if (code !== 0 && stderrBuf.trim() && !result.error && !forcedDrainAfterFinalSuccess) {
-				result.error = stderrBuf.trim();
-			}
 			const finalCode = forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (code ?? 1) : (code ?? 0);
 			finish(finalCode);
 		});
@@ -637,18 +628,23 @@ async function runSingleAttempt(
 		return result;
 	}
 
-	if (result.error && result.exitCode === 0) {
-		result.exitCode = 1;
-	}
-	if (result.exitCode === 0 && !result.error) {
-		const errInfo = detectSubagentError(result.messages);
-		if (errInfo.hasError) {
-			result.exitCode = errInfo.exitCode ?? 1;
-			result.error = errInfo.details
-				? `${errInfo.errorType} failed (exit ${errInfo.exitCode}): ${errInfo.details}`
-				: `${errInfo.errorType} failed with exit code ${errInfo.exitCode}`;
-		}
-	}
+	const classified = classifyChildRunResult({
+		agent: agent.name,
+		task,
+		candidateModel: model,
+		run: {
+			exitCode: result.exitCode,
+			error: result.error,
+			stderr: stderrOutput,
+			messages: result.messages,
+			usage: result.usage,
+			model: result.model,
+			observedMutationAttempt,
+		},
+	});
+	result.exitCode = classified.exitCode;
+	result.error = classified.error;
+	result.model = classified.model;
 
 	progress.status = result.exitCode === 0 ? "completed" : "failed";
 	progress.durationMs = Date.now() - startTime;
@@ -666,14 +662,7 @@ async function runSingleAttempt(
 	};
 
 	let fullOutput = getFinalOutput(result.messages);
-	const completionGuard = result.exitCode === 0 && !result.error
-		? evaluateCompletionMutationGuard({ agent: agent.name, task, messages: result.messages })
-		: undefined;
-	if (completionGuard?.triggered && !observedMutationAttempt) {
-		result.exitCode = 1;
-		result.error = "Subagent completed without making edits for an implementation task.\nIt appears to have returned planning or scratchpad output instead of applying changes.";
-		progress.status = "failed";
-		progress.error = result.error;
+	if (classified.completionGuardTriggered) {
 		emitControlEvent(buildControlEvent({
 			from: progress.activityState,
 			to: "needs_attention",
@@ -685,19 +674,21 @@ async function runSingleAttempt(
 			reason: "completion_guard",
 		}));
 	}
-	if (options.outputPath && result.exitCode === 0) {
-		const resolvedOutput = resolveSingleOutput(options.outputPath, fullOutput, shared.outputSnapshot);
-		fullOutput = resolvedOutput.fullOutput;
-		result.savedOutputPath = resolvedOutput.savedPath;
-		result.outputSaveError = resolvedOutput.saveError;
-		if (resolvedOutput.savedPath) {
-			result.outputReference = formatSavedOutputReference(resolvedOutput.savedPath, fullOutput);
-		}
-	}
+	const finalizedOutput = finalizeChildOutput({
+		rawOutput: fullOutput,
+		exitCode: result.exitCode,
+		outputPath: options.outputPath,
+		outputMode: options.outputMode,
+		outputSnapshot: shared.outputSnapshot,
+	});
+	fullOutput = finalizedOutput.fullOutput;
+	result.savedOutputPath = finalizedOutput.savedPath;
+	result.outputSaveError = finalizedOutput.saveError;
+	result.outputReference = finalizedOutput.outputReference;
 	artifactOutputByResult.set(result, fullOutput);
 	result.outputMode = options.outputMode ?? "inline";
 	result.finalOutput = options.outputMode === "file-only" && result.savedOutputPath && result.outputReference
-		? result.outputReference.message
+		? finalizedOutput.displayOutput
 		: fullOutput;
 	result.controlEvents = allControlEvents.length ? allControlEvents : undefined;
 	if (options.onUpdate) {
@@ -785,18 +776,16 @@ export async function runSync(
 	let totalToolCount = 0;
 	let totalDurationMs = 0;
 
-	let artifactPathsResult: ArtifactPaths | undefined;
-	let jsonlPath: string | undefined;
-	if (options.artifactsDir && options.artifactConfig?.enabled !== false) {
-		artifactPathsResult = getArtifactPaths(options.artifactsDir, options.runId, agentName, options.index);
-		ensureArtifactsDir(options.artifactsDir);
-		if (options.artifactConfig?.includeInput !== false) {
-			writeArtifact(artifactPathsResult.inputPath, `# Task for ${agentName}\n\n${task}`);
-		}
-		if (options.artifactConfig?.includeJsonl !== false) {
-			jsonlPath = artifactPathsResult.jsonlPath;
-		}
-	}
+	const runArtifacts = createRunArtifacts({
+		artifactsDir: options.artifactsDir,
+		artifactConfig: options.artifactConfig,
+		runId: options.runId,
+		agent: agentName,
+		index: options.index,
+	});
+	const artifactPathsResult = runArtifacts.paths;
+	const jsonlPath = runArtifacts.jsonlPath;
+	runArtifacts.recordInput(task);
 
 	let lastResult: SingleResult | undefined;
 	const modelsToTry = candidates.length > 0 ? candidates : [undefined];
@@ -860,29 +849,22 @@ export async function runSync(
 		}
 	}
 
-	if (artifactPathsResult && options.artifactConfig?.enabled !== false) {
+	if (artifactPathsResult) {
 		result.artifactPaths = artifactPathsResult;
-		if (options.artifactConfig?.includeOutput !== false) {
-			writeArtifact(artifactPathsResult.outputPath, artifactOutputByResult.get(result) ?? result.finalOutput ?? "");
-		}
-		if (options.artifactConfig?.includeMetadata !== false) {
-			writeMetadata(artifactPathsResult.metadataPath, {
-				runId: options.runId,
-				agent: agentName,
-				task,
-				exitCode: result.exitCode,
-				usage: result.usage,
-				model: result.model,
-				attemptedModels: result.attemptedModels,
-				modelAttempts: result.modelAttempts,
-				durationMs: result.progressSummary?.durationMs,
-				toolCount: result.progressSummary?.toolCount,
-				error: result.error,
-				skills: result.skills,
-				skillsWarning: result.skillsWarning,
-				timestamp: Date.now(),
-			});
-		}
+		runArtifacts.recordResult({
+			task,
+			output: artifactOutputByResult.get(result) ?? result.finalOutput ?? "",
+			exitCode: result.exitCode,
+			usage: result.usage,
+			model: result.model,
+			attemptedModels: result.attemptedModels,
+			modelAttempts: result.modelAttempts,
+			durationMs: result.progressSummary?.durationMs,
+			toolCount: result.progressSummary?.toolCount,
+			error: result.error,
+			skills: result.skills,
+			skillsWarning: result.skillsWarning,
+		});
 
 		if (options.maxOutput) {
 			const config = { ...DEFAULT_MAX_OUTPUT, ...options.maxOutput };

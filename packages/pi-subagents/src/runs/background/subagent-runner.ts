@@ -5,9 +5,11 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Message } from "@earendil-works/pi-ai";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
-import { appendJsonl, getArtifactPaths } from "../../shared/artifacts.ts";
+import { appendJsonl } from "../../shared/artifacts.ts";
+import { createRunArtifacts } from "../shared/run-artifacts.ts";
 import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
-import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
+import { captureSingleOutputSnapshot, type SingleOutputSnapshot } from "../shared/single-output.ts";
+import { finalizeChildOutput } from "../shared/output-finalizer.ts";
 import {
 	type ActivityState,
 	type ArtifactConfig,
@@ -43,8 +45,9 @@ import {
 import { prepareChildRun } from "../shared/child-run-preparation.ts";
 import { formatModelAttemptNote, isRetryableModelFailure } from "../shared/model-fallback.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
-import { detectSubagentError, extractTextFromContent, extractToolArgsPreview, getFinalOutput } from "../../shared/utils.ts";
-import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
+import { extractTextFromContent, getFinalOutput } from "../../shared/messages.ts";
+import { extractToolArgsPreview } from "../../shared/tool-preview.ts";
+import { classifyChildRunResult } from "../shared/result-classifier.ts";
 import {
 	createMutatingFailureState,
 	didMutatingToolFail,
@@ -573,15 +576,16 @@ async function runSingleStep(
 	const sessionEnabled = Boolean(step.sessionFile) || ctx.sessionEnabled;
 	const sessionDir = step.sessionFile ? undefined : ctx.sessionDir;
 
-	let artifactPaths: ArtifactPaths | undefined;
-	if (ctx.artifactsDir && ctx.artifactConfig?.enabled !== false) {
-		const index = ctx.flatStepCount > 1 ? ctx.flatIndex : undefined;
-		artifactPaths = getArtifactPaths(ctx.artifactsDir, ctx.id, step.agent, index);
-		fs.mkdirSync(ctx.artifactsDir, { recursive: true });
-		if (ctx.artifactConfig?.includeInput !== false) {
-			fs.writeFileSync(artifactPaths.inputPath, `# Task for ${step.agent}\n\n${task}`, "utf-8");
-		}
-	}
+	const artifactIndex = ctx.flatStepCount > 1 ? ctx.flatIndex : undefined;
+	const runArtifacts = createRunArtifacts({
+		artifactsDir: ctx.artifactsDir,
+		artifactConfig: ctx.artifactConfig,
+		runId: ctx.id,
+		agent: step.agent,
+		index: artifactIndex,
+	});
+	const artifactPaths = runArtifacts.paths;
+	runArtifacts.recordInput(task);
 
 	const candidates = step.modelCandidates && step.modelCandidates.length > 0
 		? step.modelCandidates
@@ -640,90 +644,49 @@ async function runSingleStep(
 		);
 		prepared.cleanup();
 
-		const hiddenError = run.exitCode === 0 && !run.error ? detectSubagentError(run.messages) : null;
-		const completionGuard = run.exitCode === 0 && !run.error && !hiddenError?.hasError
-			? evaluateCompletionMutationGuard({
-				agent: step.agent,
-				task,
-				messages: run.messages,
-			})
-			: undefined;
-		const completionGuardTriggered = completionGuard?.triggered === true && !run.observedMutationAttempt;
-		const completionGuardError = completionGuardTriggered
-			? "Subagent completed without making edits for an implementation task.\nIt appears to have returned planning or scratchpad output instead of applying changes."
-			: undefined;
-		const effectiveExitCode = completionGuardTriggered
-			? 1
-			: hiddenError?.hasError
-				? (hiddenError.exitCode ?? 1)
-				: run.error && run.exitCode === 0
-					? 1
-					: run.exitCode;
-		const error = completionGuardError
-			?? (hiddenError?.hasError
-				? hiddenError.details
-					? `${hiddenError.errorType} failed (exit ${effectiveExitCode}): ${hiddenError.details}`
-					: `${hiddenError.errorType} failed with exit code ${effectiveExitCode}`
-				: run.error || (run.exitCode !== 0 && run.stderr.trim() ? run.stderr.trim() : undefined));
+		const classified = classifyChildRunResult({
+			agent: step.agent,
+			task,
+			candidateModel: candidate,
+			defaultModel: step.model,
+			run,
+		});
 		const attempt: ModelAttempt = {
-			model: candidate ?? run.model ?? step.model ?? "default",
-			success: effectiveExitCode === 0 && !error,
-			exitCode: effectiveExitCode,
-			error,
+			...classified.modelAttempt,
 			usage: run.usage,
 		};
 		modelAttempts.push(attempt);
 		if (candidate) attemptedModels.push(candidate);
-		completionGuardTriggeredFinal = completionGuardTriggered;
+		completionGuardTriggeredFinal = classified.completionGuardTriggered;
 		finalOutputSnapshot = outputSnapshot;
-		finalResult = { ...run, exitCode: effectiveExitCode, model: candidate ?? run.model, error };
-		if (attempt.success || completionGuardTriggered) break;
-		if (!isRetryableModelFailure(error) || index === candidates.length - 1) break;
+		finalResult = { ...run, exitCode: classified.exitCode, model: classified.model, error: classified.error };
+		if (attempt.success || classified.completionGuardTriggered) break;
+		if (!isRetryableModelFailure(classified.error) || index === candidates.length - 1) break;
 		attemptNotes.push(formatModelAttemptNote(attempt, candidates[index + 1]));
 	}
 
-	const rawOutput = finalResult?.finalOutput ?? "";
-	const resolvedOutput = step.outputPath && finalResult?.exitCode === 0
-		? resolveSingleOutput(step.outputPath, rawOutput, finalOutputSnapshot)
-		: { fullOutput: rawOutput };
-	const output = resolvedOutput.fullOutput;
-	const outputReference = resolvedOutput.savedPath ? formatSavedOutputReference(resolvedOutput.savedPath, output) : undefined;
-	let outputForSummary = output;
-	if (attemptNotes.length > 0) {
-		outputForSummary = `${attemptNotes.join("\n")}\n\n${outputForSummary}`.trim();
-	}
-	const finalizedOutput = finalizeSingleOutput({
-		fullOutput: outputForSummary,
+	const finalizedOutput = finalizeChildOutput({
+		rawOutput: finalResult?.finalOutput ?? "",
+		exitCode: finalResult?.exitCode ?? 1,
 		outputPath: step.outputPath,
 		outputMode: step.outputMode,
-		exitCode: finalResult?.exitCode ?? 1,
-		savedPath: resolvedOutput.savedPath,
-		outputReference,
-		saveError: resolvedOutput.saveError,
+		outputSnapshot: finalOutputSnapshot,
+		attemptNotes,
 	});
-	outputForSummary = finalizedOutput.displayOutput;
+	const output = finalizedOutput.fullOutput;
+	const outputForSummary = finalizedOutput.displayOutput;
 
-	if (artifactPaths && ctx.artifactConfig?.enabled !== false) {
-		if (ctx.artifactConfig?.includeOutput !== false) {
-			fs.writeFileSync(artifactPaths.outputPath, output, "utf-8");
-		}
-		if (ctx.artifactConfig?.includeMetadata !== false) {
-			fs.writeFileSync(
-				artifactPaths.metadataPath,
-				JSON.stringify({
-					runId: ctx.id,
-					agent: step.agent,
-					task,
-					exitCode: finalResult?.exitCode,
-					model: finalResult?.model,
-					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
-					modelAttempts,
-					skills: step.skills,
-					timestamp: Date.now(),
-				}, null, 2),
-				"utf-8",
-			);
-		}
+	if (artifactPaths) {
+		runArtifacts.recordResult({
+			task,
+			output,
+			exitCode: finalResult?.exitCode ?? 1,
+			model: finalResult?.model,
+			attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
+			modelAttempts,
+			skills: step.skills,
+			error: finalResult?.error,
+		});
 	}
 
 	return {

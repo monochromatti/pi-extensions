@@ -129,3 +129,31 @@ test("8.3 contact_supervisor reason schema exposes child-only reasons", () => {
 		assert.deepEqual(contact.parameters?.properties?.reason?.enum, ["need_decision", "progress_update", "interview_request"]);
 	});
 });
+
+test("7.1 registration still loads after shared module split", async () => {
+	const [types, depth, tempPaths, output, statusStore, messages, errorDetection, toolPreview] = await Promise.all([
+		import("../../src/shared/types.ts"),
+		import("../../src/shared/depth.ts"),
+		import("../../src/shared/temp-paths.ts"),
+		import("../../src/shared/output.ts"),
+		import("../../src/runs/background/status-store.ts"),
+		import("../../src/shared/messages.ts"),
+		import("../../src/shared/error-detection.ts"),
+		import("../../src/shared/tool-preview.ts"),
+	]);
+
+	assert.equal(typeof types.checkSubagentDepth, "function");
+	assert.equal(typeof depth.checkSubagentDepth, "function");
+	assert.equal(typeof tempPaths.resolveTempScopeId, "function");
+	assert.equal(typeof output.truncateOutput, "function");
+	assert.equal(typeof statusStore.readStatus, "function");
+	assert.equal(typeof messages.getFinalOutput, "function");
+	assert.equal(typeof errorDetection.detectSubagentError, "function");
+	assert.equal(typeof toolPreview.extractToolArgsPreview, "function");
+
+	withEnv({}, () => {
+		const fake = createFakePi();
+		registerSubagentExtension(fake.pi);
+		assert.deepEqual(toolNames(fake.tools), ["intercom", "subagent"]);
+	});
+});

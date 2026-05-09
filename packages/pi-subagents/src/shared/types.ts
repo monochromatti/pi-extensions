@@ -2,37 +2,18 @@
  * Type definitions for the subagent extension
  */
 
-import * as os from "node:os";
-import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { MaxOutputConfig, SavedOutputReference, TruncationResult } from "./output.ts";
 
 // ============================================================================
 // Basic Types
 // ============================================================================
 
-export interface MaxOutputConfig {
-	bytes?: number;
-	lines?: number;
-}
+export type { MaxOutputConfig, SavedOutputReference, TruncationResult } from "./output.ts";
 
 export type OutputMode = "inline" | "file-only";
-
-export interface SavedOutputReference {
-	path: string;
-	bytes: number;
-	lines: number;
-	message: string;
-}
-
-interface TruncationResult {
-	text: string;
-	truncated: boolean;
-	originalBytes?: number;
-	originalLines?: number;
-	artifactPath?: string;
-}
 
 export interface Usage {
 	input: number;
@@ -510,10 +491,7 @@ export interface ExtensionConfig {
 // Constants
 // ============================================================================
 
-export const DEFAULT_MAX_OUTPUT: Required<MaxOutputConfig> = {
-	bytes: 200 * 1024,
-	lines: 5000,
-};
+export { DEFAULT_MAX_OUTPUT, truncateOutput } from "./output.ts";
 
 export const DEFAULT_ARTIFACT_CONFIG: ArtifactConfig = {
 	enabled: true,
@@ -524,66 +502,17 @@ export const DEFAULT_ARTIFACT_CONFIG: ArtifactConfig = {
 	cleanupDays: 7,
 };
 
-function sanitizeTempScopeSegment(value: string): string {
-	const sanitized = value
-		.trim()
-		.replace(/[^A-Za-z0-9._-]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-	return sanitized || "unknown";
-}
-
-export function resolveTempScopeId(options?: {
-	env?: NodeJS.ProcessEnv;
-	getuid?: (() => number) | undefined;
-	userInfo?: (() => { username?: string | null }) | undefined;
-	homedir?: (() => string) | undefined;
-}): string {
-	const env = options?.env ?? process.env;
-	const getuid = options && Object.hasOwn(options, "getuid")
-		? options.getuid
-		: process.getuid?.bind(process);
-	if (typeof getuid === "function") {
-		return `uid-${getuid()}`;
-	}
-
-	for (const key of ["USERNAME", "USER", "LOGNAME"] as const) {
-		const value = env[key];
-		if (value) return `user-${sanitizeTempScopeSegment(value)}`;
-	}
-
-	const userInfo = options && Object.hasOwn(options, "userInfo")
-		? options.userInfo
-		: os.userInfo;
-	try {
-		const username = userInfo?.().username;
-		if (username) return `user-${sanitizeTempScopeSegment(username)}`;
-	} catch {
-		// Fall through to home-directory-based scoping.
-	}
-
-	const homedir = env.USERPROFILE ?? env.HOME;
-	if (homedir) return `home-${sanitizeTempScopeSegment(homedir)}`;
-
-	const resolveHomedir = options && Object.hasOwn(options, "homedir")
-		? options.homedir
-		: os.homedir;
-	try {
-		const fallbackHomedir = resolveHomedir?.();
-		if (fallbackHomedir) return `home-${sanitizeTempScopeSegment(fallbackHomedir)}`;
-	} catch {
-		// Fall through to the last-resort shared scope.
-	}
-
-	return "shared";
-}
-
 const MAX_PARALLEL = 8;
 export const MAX_CONCURRENCY = 4;
-export const TEMP_ROOT_DIR = path.join(os.tmpdir(), `pi-subagents-${resolveTempScopeId()}`);
-export const RESULTS_DIR = path.join(TEMP_ROOT_DIR, "async-subagent-results");
-export const ASYNC_DIR = path.join(TEMP_ROOT_DIR, "async-subagent-runs");
-export const CHAIN_RUNS_DIR = path.join(TEMP_ROOT_DIR, "chain-runs");
-export const TEMP_ARTIFACTS_DIR = path.join(TEMP_ROOT_DIR, "artifacts");
+export {
+	resolveTempScopeId,
+	TEMP_ROOT_DIR,
+	RESULTS_DIR,
+	ASYNC_DIR,
+	CHAIN_RUNS_DIR,
+	TEMP_ARTIFACTS_DIR,
+	getAsyncConfigPath,
+} from "./temp-paths.ts";
 export const WIDGET_KEY = "subagent-async";
 export const SLASH_RESULT_TYPE = "subagent-slash-result";
 export const SLASH_SUBAGENT_REQUEST_EVENT = "subagent:slash:request";
@@ -593,7 +522,7 @@ export const SLASH_SUBAGENT_UPDATE_EVENT = "subagent:slash:update";
 export const SLASH_SUBAGENT_CANCEL_EVENT = "subagent:slash:cancel";
 export const POLL_INTERVAL_MS = 250;
 export const MAX_WIDGET_JOBS = 4;
-export const DEFAULT_SUBAGENT_MAX_DEPTH = 2;
+export { DEFAULT_SUBAGENT_MAX_DEPTH } from "./depth.ts";
 export const SUBAGENT_CONTROL_ACTIONS = ["status", "interrupt", "resume"] as const;
 
 export const DEFAULT_FORK_PREAMBLE =
@@ -621,10 +550,6 @@ export function resolveTopLevelParallelConcurrency(
 		?? MAX_CONCURRENCY;
 }
 
-export function getAsyncConfigPath(suffix: string): string {
-	return path.join(TEMP_ROOT_DIR, `async-cfg-${suffix}.json`);
-}
-
 export function wrapForkTask(task: string, preamble?: string | false): string {
 	if (preamble === false) return task;
 	const effectivePreamble = preamble ?? DEFAULT_FORK_PREAMBLE;
@@ -637,90 +562,11 @@ export function wrapForkTask(task: string, preamble?: string | false): string {
 // Recursion Depth Guard
 // ============================================================================
 
-export function normalizeMaxSubagentDepth(value: unknown): number | undefined {
-	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
-	if (!Number.isInteger(parsed) || parsed < 0) return undefined;
-	return parsed;
-}
+export {
+	normalizeMaxSubagentDepth,
+	resolveCurrentMaxSubagentDepth,
+	resolveChildMaxSubagentDepth,
+	checkSubagentDepth,
+	getSubagentDepthEnv,
+} from "./depth.ts";
 
-export function resolveCurrentMaxSubagentDepth(configMaxDepth?: number): number {
-	return normalizeMaxSubagentDepth(process.env.PI_SUBAGENT_MAX_DEPTH)
-		?? normalizeMaxSubagentDepth(configMaxDepth)
-		?? DEFAULT_SUBAGENT_MAX_DEPTH;
-}
-
-export function resolveChildMaxSubagentDepth(parentMaxDepth: number, agentMaxDepth?: number): number {
-	const normalizedParent = normalizeMaxSubagentDepth(parentMaxDepth) ?? DEFAULT_SUBAGENT_MAX_DEPTH;
-	const normalizedAgent = normalizeMaxSubagentDepth(agentMaxDepth);
-	return normalizedAgent === undefined ? normalizedParent : Math.min(normalizedParent, normalizedAgent);
-}
-
-export function checkSubagentDepth(configMaxDepth?: number): { blocked: boolean; depth: number; maxDepth: number } {
-	const depth = Number(process.env.PI_SUBAGENT_DEPTH ?? "0");
-	const maxDepth = resolveCurrentMaxSubagentDepth(configMaxDepth);
-	const blocked = Number.isFinite(depth) && depth >= maxDepth;
-	return { blocked, depth, maxDepth };
-}
-
-export function getSubagentDepthEnv(maxDepth?: number): Record<string, string> {
-	const parentDepth = Number(process.env.PI_SUBAGENT_DEPTH ?? "0");
-	const nextDepth = Number.isFinite(parentDepth) ? parentDepth + 1 : 1;
-	return {
-		PI_SUBAGENT_DEPTH: String(nextDepth),
-		PI_SUBAGENT_MAX_DEPTH: String(normalizeMaxSubagentDepth(maxDepth) ?? resolveCurrentMaxSubagentDepth()),
-	};
-}
-
-// ============================================================================
-// Utility Functions
-// ============================================================================
-
-function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes}B`;
-	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-	return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-export function truncateOutput(
-	output: string,
-	config: Required<MaxOutputConfig>,
-	artifactPath?: string,
-): TruncationResult {
-	const lines = output.split("\n");
-	const bytes = Buffer.byteLength(output, "utf-8");
-
-	if (bytes <= config.bytes && lines.length <= config.lines) {
-		return { text: output, truncated: false };
-	}
-
-	let truncatedLines = lines;
-	if (lines.length > config.lines) {
-		truncatedLines = lines.slice(0, config.lines);
-	}
-
-	let result = truncatedLines.join("\n");
-	if (Buffer.byteLength(result, "utf-8") > config.bytes) {
-		let low = 0;
-		let high = result.length;
-		while (low < high) {
-			const mid = Math.floor((low + high + 1) / 2);
-			if (Buffer.byteLength(result.slice(0, mid), "utf-8") <= config.bytes) {
-				low = mid;
-			} else {
-				high = mid - 1;
-			}
-		}
-		result = result.slice(0, low);
-	}
-
-	const keptLines = result.split("\n").length;
-	const marker = `[TRUNCATED: showing first ${keptLines} of ${lines.length} lines, ${formatBytes(Buffer.byteLength(result))} of ${formatBytes(bytes)}${artifactPath ? ` - full output at ${artifactPath}` : ""}]\n`;
-
-	return {
-		text: marker + result,
-		truncated: true,
-		originalBytes: bytes,
-		originalLines: lines.length,
-		artifactPath,
-	};
-}

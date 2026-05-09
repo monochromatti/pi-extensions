@@ -16,7 +16,8 @@ import {
 	WIDGET_KEY,
 } from "../shared/types.ts";
 import { formatTokens, formatUsage, formatDuration, formatToolCall, shortenPath } from "../shared/formatters.ts";
-import { getDisplayItems, getLastActivity, getSingleResultOutput } from "../shared/utils.ts";
+import { getLastActivity } from "../shared/utils.ts";
+import { getDisplayItems, getSingleResultOutput } from "../shared/messages.ts";
 import { flatToLogicalStepIndex } from "../runs/background/parallel-groups.ts";
 import { aggregateStepStatus, formatActivityLabel, formatAgentRunningLabel, formatParallelOutcome } from "../shared/status-format.ts";
 
