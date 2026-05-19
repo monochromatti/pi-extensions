@@ -25,6 +25,13 @@ test("7.1 broker socket path uses broker.sock on non-Windows", () => {
 	assert.match(socketPath, /pi/);
 });
 
+test("7.1 broker socket path falls back to short temp path when home path is too long", () => {
+	const longHome = `/tmp/${"very-long-segment-".repeat(8)}`;
+	const socketPath = getBrokerSocketPath("darwin", longHome, "/tmp");
+	assert.match(socketPath, /^\/tmp\/pi-intercom-[a-f0-9]{16}\.sock$/);
+	assert.ok(socketPath.length < 100);
+});
+
 test("7.1 broker spawn helpers build direct non-Windows launch specs", () => {
 	const spec = getBrokerLaunchSpec("/repo/broker.ts", "npx", ["--no-install", "tsx"], "/repo", "linux", "/tmp/intercom", "/usr/bin/node");
 	assert.equal(spec.command, "npx");

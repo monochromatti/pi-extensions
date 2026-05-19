@@ -25,6 +25,11 @@ interface AsyncJobTrackerOptions {
 	now?: () => number;
 }
 
+export function isAsyncControlEventActionable(job: Pick<AsyncJobState, "status">, event: ControlEvent): boolean {
+	if (event.reason === "completion_guard") return true;
+	return job.status !== "complete" && job.status !== "failed";
+}
+
 export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: SubagentState, asyncDirRoot: string, options: AsyncJobTrackerOptions = {}): {
 	ensurePoller: () => void;
 	handleStarted: (data: unknown) => void;
@@ -81,6 +86,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 				if (!parsed || typeof parsed !== "object" || (parsed as { type?: unknown }).type !== "subagent.control") continue;
 				const record = parsed as { event?: ControlEvent; channels?: string[]; childIntercomTarget?: string; noticeText?: string; intercom?: { to?: string; message?: string } };
 				if (!record.event || !Array.isArray(record.channels)) continue;
+				if (!isAsyncControlEventActionable(job, record.event)) continue;
 				const payload = {
 					event: record.event,
 					source: "async" as const,
@@ -120,7 +126,6 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 
 			for (const job of state.asyncJobs.values()) {
 				try {
-					emitNewControlEvents(job);
 					const reconciliation = reconcileAsyncRun(job.asyncDir, {
 						resultsDir,
 						kill: options.kill,
@@ -179,6 +184,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 						if ((job.status === "complete" || job.status === "failed" || job.status === "paused") && (previousStatus !== job.status || !state.cleanupTimers.has(job.asyncId))) {
 							scheduleCleanup(job.asyncId);
 						}
+						emitNewControlEvents(job);
 						continue;
 					}
 					job.status = job.status === "queued" ? "running" : job.status;

@@ -4,7 +4,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
-import { getBrokerSocketPath } from "./paths.ts";
+import { getBrokerSocketDir, getBrokerSocketPath } from "./paths.ts";
 import type { SessionInfo, Message, Attachment, BrokerMessage } from "../types.ts";
 
 const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
@@ -101,6 +101,7 @@ class IntercomBroker {
 
   constructor() {
     mkdirSync(INTERCOM_DIR, { recursive: true });
+    mkdirSync(getBrokerSocketDir(SOCKET_PATH), { recursive: true });
     if (process.platform !== "win32") {
       try {
         unlinkSync(SOCKET_PATH);
