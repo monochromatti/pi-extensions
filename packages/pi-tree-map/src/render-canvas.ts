@@ -167,28 +167,33 @@ export function getTreeMapThemeSignature(theme: Theme): string {
 	return [styles.currentNodeStyle, styles.selectedNodeStyle, styles.userRoleStyle, styles.assistantRoleStyle, styles.messageRoleStyle].join("|");
 }
 
-function colorizeNonSpaceRange(line: string, start: number, endExclusive: number, style: string): string {
-	if (start >= endExclusive || endExclusive <= 0 || start >= line.length) return line;
+function markStyledRange(line: string, styleByColumn: Array<string | undefined>, start: number, endExclusive: number, style: string): void {
+	if (start >= endExclusive || endExclusive <= 0 || start >= line.length) return;
 	const safeStart = Math.max(0, start);
 	const safeEnd = Math.min(line.length, endExclusive);
-	if (safeStart >= safeEnd) return line;
+	if (safeStart >= safeEnd) return;
 
+	for (let i = safeStart; i < safeEnd; i++) {
+		if (line[i] !== " ") styleByColumn[i] = style;
+	}
+}
+
+function applyStyledColumns(line: string, styleByColumn: Array<string | undefined>): string {
 	let out = "";
-	let styled = false;
+	let activeStyle: string | undefined;
+
 	for (let i = 0; i < line.length; i++) {
 		const ch = line[i]!;
-		const inRange = i >= safeStart && i < safeEnd;
-		const shouldStyle = inRange && ch !== " ";
-		if (shouldStyle && !styled) {
-			out += style;
-			styled = true;
-		} else if (!shouldStyle && styled) {
-			out += RESET_STYLE;
-			styled = false;
+		const nextStyle = ch === " " ? undefined : styleByColumn[i];
+		if (nextStyle !== activeStyle) {
+			if (activeStyle) out += RESET_STYLE;
+			if (nextStyle) out += nextStyle;
+			activeStyle = nextStyle;
 		}
 		out += ch;
 	}
-	if (styled) out += RESET_STYLE;
+
+	if (activeStyle) out += RESET_STYLE;
 	return out;
 }
 
@@ -482,10 +487,11 @@ export function renderTreeMap(
 			const worldCol = col + camera.cameraX;
 			line += worldCol >= 0 && worldCol < source.length ? source[worldCol] : " ";
 		}
+		const styleByColumn: Array<string | undefined> = Array.from({ length: line.length }, () => undefined);
 		if (currentDrawNode && worldRow >= currentDrawNode.y && worldRow < currentDrawNode.y + currentDrawNode.h) {
 			const start = currentDrawNode.x - camera.cameraX;
 			const endExclusive = currentDrawNode.x + currentDrawNode.w - camera.cameraX;
-			line = colorizeNonSpaceRange(line, start, endExclusive, styles.currentNodeStyle);
+			markStyledRange(line, styleByColumn, start, endExclusive, styles.currentNodeStyle);
 		}
 		if (
 			selectedDrawNode &&
@@ -495,9 +501,9 @@ export function renderTreeMap(
 		) {
 			const start = selectedDrawNode.x - camera.cameraX;
 			const endExclusive = selectedDrawNode.x + selectedDrawNode.w - camera.cameraX;
-			line = colorizeNonSpaceRange(line, start, endExclusive, styles.selectedNodeStyle);
+			markStyledRange(line, styleByColumn, start, endExclusive, styles.selectedNodeStyle);
 		}
-		lines.push(line);
+		lines.push(applyStyledColumns(line, styleByColumn));
 	}
 
 	if (modalLines.length > 0) {
