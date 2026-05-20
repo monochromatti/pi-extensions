@@ -8,6 +8,7 @@ const TASK_ARG_LIMIT = 8000;
 const PROMPT_RUNTIME_EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-prompt-runtime.ts");
 export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
 export const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET";
+export const SUBAGENT_ORCHESTRATOR_CWD_ENV = "PI_SUBAGENT_ORCHESTRATOR_CWD";
 export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 export const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 export const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
@@ -30,6 +31,7 @@ export interface BuildPiArgsInput {
 	promptFileStem?: string;
 	intercomSessionName?: string;
 	orchestratorIntercomTarget?: string;
+	orchestratorIntercomCwd?: string;
 	runId?: string;
 	childAgentName?: string;
 	childIndex?: number;
@@ -129,6 +131,9 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	}
 	if (input.orchestratorIntercomTarget) {
 		env[SUBAGENT_ORCHESTRATOR_TARGET_ENV] = input.orchestratorIntercomTarget;
+	}
+	if (input.orchestratorIntercomCwd) {
+		env[SUBAGENT_ORCHESTRATOR_CWD_ENV] = input.orchestratorIntercomCwd;
 	}
 	if (input.runId) {
 		env[SUBAGENT_RUN_ID_ENV] = input.runId;

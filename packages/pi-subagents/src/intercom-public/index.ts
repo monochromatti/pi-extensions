@@ -18,6 +18,7 @@ const INBOUND_FLUSH_DELAY_MS = 200;
 const INBOUND_IDLE_RETRY_MS = 500;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
 const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET";
+const SUBAGENT_ORCHESTRATOR_CWD_ENV = "PI_SUBAGENT_ORCHESTRATOR_CWD";
 const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
@@ -25,6 +26,7 @@ const SUBAGENT_INTERCOM_SESSION_NAME_ENV = "PI_SUBAGENT_INTERCOM_SESSION_NAME";
 
 interface ChildOrchestratorMetadata {
   orchestratorTarget: string;
+  orchestratorCwd?: string;
   runId: string;
   agent: string;
   index: string;
@@ -78,6 +80,7 @@ function formatAttachments(attachments: Attachment[]): string {
 }
 function readChildOrchestratorMetadata(): ChildOrchestratorMetadata | null {
   const orchestratorTarget = process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV]?.trim();
+  const orchestratorCwd = process.env[SUBAGENT_ORCHESTRATOR_CWD_ENV]?.trim();
   const runId = process.env[SUBAGENT_RUN_ID_ENV]?.trim();
   const agent = process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim();
   const index = process.env[SUBAGENT_CHILD_INDEX_ENV]?.trim();
@@ -87,6 +90,7 @@ function readChildOrchestratorMetadata(): ChildOrchestratorMetadata | null {
   const sessionName = process.env[SUBAGENT_INTERCOM_SESSION_NAME_ENV]?.trim();
   return {
     orchestratorTarget,
+    ...(orchestratorCwd ? { orchestratorCwd } : {}),
     runId,
     agent,
     index,
@@ -796,6 +800,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return byName[0]?.id ?? null;
   }
+  function normalizeCwdForCompare(cwd: string): string {
+    const trimmed = cwd.trim().replaceAll("\\", "/");
+    return trimmed.endsWith("/") && trimmed.length > 1 ? trimmed.slice(0, -1) : trimmed;
+  }
   function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
     const now = Date.now();
     sendIncomingMessage({
@@ -1132,6 +1140,17 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
             isError: true,
             details: { error: true },
           };
+        }
+        if (metadata.orchestratorCwd) {
+          const sessions = await connectedClient.listSessions();
+          const targetSession = sessions.find((session) => session.id === sendTo);
+          if (targetSession && normalizeCwdForCompare(targetSession.cwd) !== normalizeCwdForCompare(metadata.orchestratorCwd)) {
+            return {
+              content: [{ type: "text", text: `Resolved supervisor target cwd mismatch. Expected ${metadata.orchestratorCwd}, got ${targetSession.cwd}. Refusing to send.` }],
+              isError: true,
+              details: { error: true },
+            };
+          }
         }
 
         if (reason === "progress_update") {

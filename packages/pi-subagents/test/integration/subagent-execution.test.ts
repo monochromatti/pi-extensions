@@ -174,7 +174,7 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 
 	it("9.1/9.2 parent subagent run sets supervisor target env from parent intercom target", async () => {
 		await withIntercomBridgeHome(tempDir, async () => {
-			mockPi.onCall({ echoEnv: ["PI_SUBAGENT_ORCHESTRATOR_TARGET", "PI_SUBAGENT_INTERCOM_SESSION_NAME", "PI_SUBAGENT_CHILD_AGENT", "PI_SUBAGENT_CHILD_INDEX"] });
+			mockPi.onCall({ echoEnv: ["PI_SUBAGENT_ORCHESTRATOR_TARGET", "PI_SUBAGENT_ORCHESTRATOR_CWD", "PI_SUBAGENT_INTERCOM_SESSION_NAME", "PI_SUBAGENT_CHILD_AGENT", "PI_SUBAGENT_CHILD_INDEX"] });
 			const executor = makeExecutor([makeAgent("worker")], { intercomBridge: { mode: "always" } });
 
 			const result = await executor.execute(
@@ -188,6 +188,7 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 			assert.equal(result.isError, undefined);
 			const env = JSON.parse(result.details?.results?.[0]?.finalOutput ?? "{}") as Record<string, string | null>;
 			assert.equal(env.PI_SUBAGENT_ORCHESTRATOR_TARGET, "parent-session");
+			assert.equal(env.PI_SUBAGENT_ORCHESTRATOR_CWD, tempDir);
 			assert.match(env.PI_SUBAGENT_INTERCOM_SESSION_NAME ?? "", /^subagent-worker-[a-z0-9-]+-1$/);
 			assert.equal(env.PI_SUBAGENT_CHILD_AGENT, "worker");
 			assert.equal(env.PI_SUBAGENT_CHILD_INDEX, "0");

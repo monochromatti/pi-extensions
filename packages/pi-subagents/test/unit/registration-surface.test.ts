@@ -5,6 +5,7 @@ import registerSubagentExtension from "../../src/extension/index.ts";
 const CHILD_ENV_KEYS = [
 	"PI_SUBAGENT_CHILD",
 	"PI_SUBAGENT_ORCHESTRATOR_TARGET",
+	"PI_SUBAGENT_ORCHESTRATOR_CWD",
 	"PI_SUBAGENT_RUN_ID",
 	"PI_SUBAGENT_CHILD_AGENT",
 	"PI_SUBAGENT_CHILD_INDEX",

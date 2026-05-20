@@ -628,6 +628,7 @@ async function runSingleStep(
 			supervisor: {
 				childIntercomTarget: ctx.childIntercomTarget,
 				orchestratorIntercomTarget: ctx.orchestratorIntercomTarget,
+				orchestratorIntercomCwd: ctx.cwd,
 			},
 		});
 		const run = await runPiStreaming(

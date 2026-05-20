@@ -58,6 +58,7 @@ interface ChainExecutionParams {
 	controlConfig: ResolvedControlConfig;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	orchestratorIntercomTarget?: string;
+	orchestratorIntercomCwd?: string;
 	foregroundControl?: {
 		updatedAt: number;
 		currentAgent?: string;
@@ -232,6 +233,7 @@ async function runChainChild(input: {
 		controlConfig: params.controlConfig,
 		intercomSessionName: params.childIntercomTarget?.(agentName, globalIndex),
 		orchestratorIntercomTarget: params.orchestratorIntercomTarget,
+		orchestratorIntercomCwd: params.orchestratorIntercomCwd,
 		artifactsDir: params.artifactsDir,
 		artifactConfig: params.artifactConfig,
 		runId: params.runId,

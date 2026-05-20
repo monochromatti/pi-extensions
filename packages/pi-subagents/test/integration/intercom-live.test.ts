@@ -28,6 +28,7 @@ process.on("exit", () => {
 const CHILD_ENV_KEYS = [
 	"PI_SUBAGENT_CHILD",
 	"PI_SUBAGENT_ORCHESTRATOR_TARGET",
+	"PI_SUBAGENT_ORCHESTRATOR_CWD",
 	"PI_SUBAGENT_RUN_ID",
 	"PI_SUBAGENT_CHILD_AGENT",
 	"PI_SUBAGENT_CHILD_INDEX",
@@ -335,6 +336,39 @@ test("8.5/8.6 contact_supervisor progress_update sends non-blocking update to pa
 					assert.equal(result.isError, false);
 					await waitUntil(() => parent.sentMessages.some((entry) => entry.message.content?.includes("UPDATE: half done")), "parent did not receive progress update");
 					assert.match(parent.sentMessages.map((entry) => entry.message.content ?? "").join("\n"), /Run: run-progress/);
+				} finally {
+					await child.shutdown();
+				}
+			});
+		} finally {
+			await parent.shutdown();
+		}
+	});
+});
+
+test("8.6b contact_supervisor refuses delivery when resolved supervisor cwd mismatches expected cwd", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const parent = await createHarness("parent-supervisor");
+		try {
+			await parent.start();
+			await withChildEnv({
+				PI_SUBAGENT_CHILD: "1",
+				PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-supervisor",
+				PI_SUBAGENT_ORCHESTRATOR_CWD: "/unexpected/cwd",
+				PI_SUBAGENT_RUN_ID: "run-progress",
+				PI_SUBAGENT_CHILD_AGENT: "worker",
+				PI_SUBAGENT_CHILD_INDEX: "0",
+			}, async () => {
+				const child = await createHarness("child-progress");
+				try {
+					await child.start();
+					const result = await child.tool("contact_supervisor").execute("contact", {
+						reason: "progress_update",
+						message: "UPDATE: should not send",
+					}, new AbortController().signal, undefined, child.ctx);
+					assert.equal(result.isError, true);
+					assert.match(text(result), /cwd mismatch/i);
+					assert.equal(parent.sentMessages.some((entry) => entry.message.content?.includes("UPDATE: should not send")), false);
 				} finally {
 					await child.shutdown();
 				}

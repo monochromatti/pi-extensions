@@ -799,6 +799,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		controlConfig,
 		childIntercomTarget: childIntercomTarget ? (agent, index) => childIntercomTarget(runId, agent, index) : undefined,
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
+		orchestratorIntercomCwd: data.intercomBridge.active ? ctx.cwd : undefined,
 		foregroundControl,
 		chainSkills,
 		maxSubagentDepth: currentMaxSubagentDepth,
@@ -888,6 +889,7 @@ interface ForegroundParallelRunInput {
 	onControlEvent?: (event: ControlEvent) => void;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	orchestratorIntercomTarget?: string;
+	orchestratorIntercomCwd?: string;
 	foregroundControl?: SubagentState["foregroundControls"] extends Map<string, infer T> ? T : never;
 	concurrencyLimit: number;
 	liveResults: (SingleResult | undefined)[];
@@ -979,6 +981,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			onControlEvent: input.onControlEvent,
 			intercomSessionName: input.childIntercomTarget?.(task.agent, index),
 			orchestratorIntercomTarget: input.orchestratorIntercomTarget,
+			orchestratorIntercomCwd: input.orchestratorIntercomCwd,
 			modelOverride: input.modelOverrides[index],
 			thinkingOverride: input.thinkingOverrides[index],
 			availableModels: input.availableModels,
@@ -1149,6 +1152,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			onControlEvent,
 			childIntercomTarget: childIntercomTarget ? (agent, index) => childIntercomTarget(runId, agent, index) : undefined,
 			orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
+			orchestratorIntercomCwd: data.intercomBridge.active ? ctx.cwd : undefined,
 			foregroundControl,
 			concurrencyLimit: parallelConcurrency,
 			maxSubagentDepths,
@@ -1346,6 +1350,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		onControlEvent,
 		intercomSessionName: childIntercomTarget,
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
+		orchestratorIntercomCwd: data.intercomBridge.active ? ctx.cwd : undefined,
 		index: 0,
 		modelOverride,
 		thinkingOverride,

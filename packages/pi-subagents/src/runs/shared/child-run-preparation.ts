@@ -43,6 +43,7 @@ export interface ChildRunCapabilities {
 export interface ChildRunSupervisor {
 	childIntercomTarget?: string;
 	orchestratorIntercomTarget?: string;
+	orchestratorIntercomCwd?: string;
 }
 
 export interface ChildRunRequest {
@@ -99,6 +100,7 @@ export function prepareChildRun(
 		promptFileStem: request.capabilities.promptFileStem,
 		intercomSessionName: request.supervisor?.childIntercomTarget,
 		orchestratorIntercomTarget: request.supervisor?.orchestratorIntercomTarget,
+		orchestratorIntercomCwd: request.supervisor?.orchestratorIntercomCwd,
 		runId: request.identity.runId,
 		childAgentName: request.identity.agentName,
 		childIndex: request.identity.childIndex,

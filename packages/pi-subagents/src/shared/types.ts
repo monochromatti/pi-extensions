@@ -442,6 +442,7 @@ export interface RunSyncOptions {
 	controlConfig?: ResolvedControlConfig;
 	intercomSessionName?: string;
 	orchestratorIntercomTarget?: string;
+	orchestratorIntercomCwd?: string;
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
 	artifactConfig?: ArtifactConfig;
@@ -569,4 +570,3 @@ export {
 	checkSubagentDepth,
 	getSubagentDepthEnv,
 } from "./depth.ts";
-
