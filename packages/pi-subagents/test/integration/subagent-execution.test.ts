@@ -45,11 +45,19 @@ interface TypesModule {
 	ASYNC_DIR: string;
 }
 
+interface SupervisorResolverModule {
+	registerIntercomSupervisorTargetResolver(
+		pi: Record<string, unknown>,
+		resolver: { getSupervisorTarget(piSessionId: string): Promise<{ intercomSessionId: string; piSessionId: string; alias: string; cwd: string }> },
+	): void;
+}
+
 const execution = await tryImport<ExecutionModule>("./src/runs/foreground/execution.ts");
 const utils = await tryImport<UtilsModule>("./src/shared/utils.ts");
 const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
 const asyncExecution = await tryImport<AsyncExecutionModule>("./src/runs/background/async-execution.ts");
 const types = await tryImport<TypesModule>("./src/shared/types.ts");
+const supervisorResolver = await tryImport<SupervisorResolverModule>("./src/intercom-public/supervisor-target-resolver.ts");
 const available = Boolean(execution && utils && executorMod && types);
 
 function readCalls(mockPi: MockPi): Array<{ args: string[] }> {
@@ -106,9 +114,29 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 
 	afterEach(() => removeTempDir(tempDir));
 
-	function makeExecutor(agents = [makeAgent("worker"), makeAgent("reviewer")], config: Record<string, unknown> = {}, overrides: { events?: ReturnType<typeof createEventBus>; state?: Record<string, unknown> } = {}) {
+	function makeExecutor(
+		agents = [makeAgent("worker"), makeAgent("reviewer")],
+		config: Record<string, unknown> = {},
+		overrides: {
+			events?: ReturnType<typeof createEventBus>;
+			state?: Record<string, unknown>;
+			supervisorTarget?: { intercomSessionId: string; piSessionId: string; alias: string; cwd: string };
+			supervisorTargetError?: string;
+		} = {},
+	) {
+		const pi = { events: overrides.events ?? createEventBus(), getSessionName: () => "parent-session" } as Record<string, unknown>;
+		if ((overrides.supervisorTarget || overrides.supervisorTargetError) && supervisorResolver) {
+			supervisorResolver.registerIntercomSupervisorTargetResolver(pi, {
+				async getSupervisorTarget() {
+					if (overrides.supervisorTargetError) {
+						throw new Error(overrides.supervisorTargetError);
+					}
+					return overrides.supervisorTarget!;
+				},
+			});
+		}
 		return executorMod!.createSubagentExecutor({
-			pi: { events: overrides.events ?? createEventBus(), getSessionName: () => "parent-session" },
+			pi: pi as never,
 			state: overrides.state ?? { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundRuns: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
 			config,
 			asyncByDefault: false,
@@ -172,10 +200,76 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 		assert.equal(env.PI_SUBAGENT_ORCHESTRATOR_TARGET, "parent-session");
 	});
 
+	it("4.1/4.2 bridge-active launch fails fast when parent supervisor target is unavailable", async () => {
+		await withIntercomBridgeHome(tempDir, async () => {
+			mockPi.onCall({ output: "should-not-run" });
+			const executor = makeExecutor([makeAgent("worker")], { intercomBridge: { mode: "always" } });
+
+			const result = await executor.execute(
+				"bridge-fail-fast",
+				{ agent: "worker", task: "This should fail before spawn" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, true);
+			assert.match(result.content[0]?.text ?? "", /Subagent intercom bridge is active, but parent intercom registration failed/);
+			assert.equal(mockPi.callCount(), 0);
+		});
+	});
+
+	it("6.5/6.6 bridge failure keeps protocol/capability reason clear while manual mode stays unaffected", async () => {
+		await withIntercomBridgeHome(tempDir, async () => {
+			mockPi.onCall({ output: "manual-mode-still-runs" });
+
+			const bridgeExecutor = makeExecutor(
+				[makeAgent("worker")],
+				{ intercomBridge: { mode: "always" } },
+				{ supervisorTargetError: "Intercom session missing required capability: piSessionId-routing" },
+			);
+
+			const failed = await bridgeExecutor.execute(
+				"bridge-capability-fail",
+				{ agent: "worker", task: "Should fail with clear bridge reason" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(failed.isError, true);
+			assert.match(failed.content[0]?.text ?? "", /Subagent intercom bridge is active, but parent intercom registration failed/);
+			assert.match(failed.content[0]?.text ?? "", /missing required capability: piSessionId-routing/);
+
+			const manualExecutor = makeExecutor([makeAgent("worker")], { intercomBridge: { mode: "off" } });
+			const manual = await manualExecutor.execute(
+				"manual-no-bridge",
+				{ agent: "worker", task: "Should run without bridge gating" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(manual.isError, undefined);
+			assert.match(manual.details?.results?.[0]?.finalOutput ?? "", /manual-mode-still-runs/);
+		});
+	});
+
 	it("9.1/9.2 parent subagent run sets supervisor target env from parent intercom target", async () => {
 		await withIntercomBridgeHome(tempDir, async () => {
-			mockPi.onCall({ echoEnv: ["PI_SUBAGENT_ORCHESTRATOR_TARGET", "PI_SUBAGENT_ORCHESTRATOR_CWD", "PI_SUBAGENT_INTERCOM_SESSION_NAME", "PI_SUBAGENT_CHILD_AGENT", "PI_SUBAGENT_CHILD_INDEX"] });
-			const executor = makeExecutor([makeAgent("worker")], { intercomBridge: { mode: "always" } });
+			mockPi.onCall({ echoEnv: ["PI_SUBAGENT_ORCHESTRATOR_TARGET", "PI_SUBAGENT_ORCHESTRATOR_CWD", "PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID", "PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID", "PI_SUBAGENT_SUPERVISOR_ALIAS", "PI_SUBAGENT_SUPERVISOR_CWD", "PI_SUBAGENT_INTERCOM_SESSION_NAME", "PI_SUBAGENT_CHILD_AGENT", "PI_SUBAGENT_CHILD_INDEX"] });
+			const executor = makeExecutor(
+				[makeAgent("worker")],
+				{ intercomBridge: { mode: "always" } },
+				{
+					supervisorTarget: {
+						intercomSessionId: "parent-intercom-123",
+						piSessionId: "parent-pi-session",
+						alias: "parent-session",
+						cwd: tempDir,
+					},
+				},
+			);
 
 			const result = await executor.execute(
 				"bridge-env-run",
@@ -189,6 +283,10 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 			const env = JSON.parse(result.details?.results?.[0]?.finalOutput ?? "{}") as Record<string, string | null>;
 			assert.equal(env.PI_SUBAGENT_ORCHESTRATOR_TARGET, "parent-session");
 			assert.equal(env.PI_SUBAGENT_ORCHESTRATOR_CWD, tempDir);
+			assert.equal(env.PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID, "parent-intercom-123");
+			assert.equal(env.PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID, "parent-pi-session");
+			assert.equal(env.PI_SUBAGENT_SUPERVISOR_ALIAS, "parent-session");
+			assert.equal(env.PI_SUBAGENT_SUPERVISOR_CWD, tempDir);
 			assert.match(env.PI_SUBAGENT_INTERCOM_SESSION_NAME ?? "", /^subagent-worker-[a-z0-9-]+-1$/);
 			assert.equal(env.PI_SUBAGENT_CHILD_AGENT, "worker");
 			assert.equal(env.PI_SUBAGENT_CHILD_INDEX, "0");
@@ -206,7 +304,14 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 			});
 			const executor = makeExecutor([
 				makeAgent("worker", { systemPrompt: "Intercom orchestration channel:\nUse contact_supervisor for supervisor decisions." }),
-			], { intercomBridge: { mode: "always" } });
+			], { intercomBridge: { mode: "always" } }, {
+				supervisorTarget: {
+					intercomSessionId: "parent-intercom-123",
+					piSessionId: "parent-pi-session",
+					alias: "parent-session",
+					cwd: tempDir,
+				},
+			});
 
 			const startedAt = Date.now();
 			const result = await executor.execute(
@@ -220,6 +325,64 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 			assert.equal(result.isError, undefined);
 			assert.ok(Date.now() - startedAt >= 200, "foreground run should wait for child after contact_supervisor starts");
 			assert.match(result.details?.results?.[0]?.finalOutput ?? "", /completed after supervisor reply/);
+		});
+	});
+
+	it("5.5/5.6 foreground control relay payload includes ownerPiSessionId and structured target", async () => {
+		await withIntercomBridgeHome(tempDir, async () => {
+			mockPi.onCall({ output: "completed after long idle", delay: 1300 });
+			const emitted: Array<{ channel: string; payload: Record<string, unknown> }> = [];
+			const listeners = new Map<string, Set<(payload: unknown) => void>>();
+			const events = {
+				on(channel: string, handler: (payload: unknown) => void) {
+					const set = listeners.get(channel) ?? new Set<(payload: unknown) => void>();
+					set.add(handler);
+					listeners.set(channel, set);
+					return () => set.delete(handler);
+				},
+				emit(channel: string, payload: unknown) {
+					emitted.push({ channel, payload: payload as Record<string, unknown> });
+					for (const handler of listeners.get(channel) ?? []) handler(payload);
+				},
+			};
+			const supervisorTarget = {
+				intercomSessionId: "parent-intercom-123",
+				piSessionId: "parent-pi-session",
+				alias: "parent-session",
+				cwd: tempDir,
+			};
+			const executor = makeExecutor([makeAgent("worker")], { intercomBridge: { mode: "always" } }, {
+				events,
+				supervisorTarget,
+			});
+
+			const result = await executor.execute(
+				"control-relay-run",
+				{
+					agent: "worker",
+					task: "Investigate long running operation",
+					control: {
+						needsAttentionAfterMs: 1,
+						notifyOn: ["needs_attention"],
+						notifyChannels: ["intercom"],
+					},
+				},
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, undefined, result.content[0]?.text ?? "");
+			const payload = emitted.find((entry) => entry.channel === "subagent:control-intercom")?.payload;
+			assert.ok(payload, "expected subagent:control-intercom emission");
+			assert.equal(payload?.ownerPiSessionId, "session-123");
+			assert.deepEqual(payload?.target, {
+				intercomSessionId: supervisorTarget.intercomSessionId,
+				piSessionId: supervisorTarget.piSessionId,
+				alias: supervisorTarget.alias,
+			});
+			assert.equal(payload?.to, supervisorTarget.alias);
+			assert.equal(typeof payload?.message, "string");
 		});
 	});
 
@@ -482,6 +645,11 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 			assert.match(result.content[0]?.text ?? "", /Delivered follow-up to live async child/);
 			const payload = emitted.find((entry) => entry.channel === "subagent:result-intercom")?.payload;
 			assert.equal(payload?.to, `subagent-worker-${runId}-1`);
+			assert.equal(payload?.ownerPiSessionId, "session-123");
+			assert.equal(payload?.runId, runId);
+			assert.equal(payload?.agent, "worker");
+			assert.equal(payload?.index, 0);
+			assert.equal(payload?.waitForReadyMs, 5000);
 			assert.match(String(payload?.message ?? ""), /Please continue with detail/);
 		} finally {
 			fs.rmSync(asyncDir, { recursive: true, force: true });

@@ -153,6 +153,7 @@ async function runSingleAttempt(
 			childIntercomTarget: options.intercomSessionName,
 			orchestratorIntercomTarget: options.orchestratorIntercomTarget,
 			orchestratorIntercomCwd: options.orchestratorIntercomCwd,
+			supervisorIntercomTarget: options.supervisorIntercomTarget,
 		},
 	});
 

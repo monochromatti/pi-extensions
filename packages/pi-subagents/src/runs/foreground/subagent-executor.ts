@@ -35,6 +35,7 @@ import { executeAsyncChain, executeAsyncSingle, formatAsyncStartedMessage, isAsy
 import { createForkContextResolver } from "../../shared/fork-context.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
+import { getIntercomSupervisorTargetResolver } from "../../intercom-public/supervisor-target-resolver.ts";
 import { formatControlIntercomMessage, formatControlNoticeMessage, resolveControlConfig, shouldNotifyControlEvent } from "../shared/subagent-control.ts";
 import { finalizeSingleOutput, injectSingleOutputInstruction, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, resolveChildCwd } from "../../shared/utils.ts";
@@ -58,12 +59,14 @@ import {
 	type ControlEvent,
 	type Details,
 	type ExtensionConfig,
+	type IntercomRelayTarget,
 	type IntercomEventBus,
 	type MaxOutputConfig,
 	type ResolvedControlConfig,
 	type SingleResult,
 	type SubagentRunMode,
 	type SubagentState,
+	type SupervisorIntercomTarget,
 	DEFAULT_ARTIFACT_CONFIG,
 	SUBAGENT_CONTROL_EVENT,
 	SUBAGENT_CONTROL_INTERCOM_EVENT,
@@ -278,11 +281,13 @@ function getAsyncInterruptTarget(state: SubagentState, runId: string | undefined
 
 function emitControlNotification(input: {
 	pi: ExtensionAPI;
+	ownerPiSessionId: string;
 	controlConfig: ResolvedControlConfig;
 	intercomBridge: IntercomBridgeState;
 	event: ControlEvent;
 }): void {
 	if (!shouldNotifyControlEvent(input.controlConfig, input.event)) return;
+	const controlTarget = resolveIntercomRelayTarget(input.intercomBridge);
 	const childIntercomTarget = input.intercomBridge.active
 		? resolveSubagentIntercomTarget(input.event.runId, input.event.agent, input.event.index)
 		: undefined;
@@ -295,13 +300,27 @@ function emitControlNotification(input: {
 	if (input.controlConfig.notifyChannels.includes("event")) {
 		input.pi.events.emit(SUBAGENT_CONTROL_EVENT, payload);
 	}
-	if (input.event.type !== "active_long_running" && input.controlConfig.notifyChannels.includes("intercom") && input.intercomBridge.active && input.intercomBridge.orchestratorTarget) {
+	if (input.event.type !== "active_long_running" && input.controlConfig.notifyChannels.includes("intercom") && input.intercomBridge.active && input.intercomBridge.orchestratorTarget && controlTarget) {
 		input.pi.events.emit(SUBAGENT_CONTROL_INTERCOM_EVENT, {
 			...payload,
+			ownerPiSessionId: input.ownerPiSessionId,
+			target: controlTarget,
 			to: input.intercomBridge.orchestratorTarget,
 			message: formatControlIntercomMessage(input.event, childIntercomTarget),
 		});
 	}
+}
+
+function resolveIntercomRelayTarget(intercomBridge: IntercomBridgeState): IntercomRelayTarget | undefined {
+	if (!intercomBridge.active || !intercomBridge.orchestratorTarget) return undefined;
+	if (intercomBridge.supervisorTarget) {
+		return {
+			intercomSessionId: intercomBridge.supervisorTarget.intercomSessionId,
+			piSessionId: intercomBridge.supervisorTarget.piSessionId,
+			alias: intercomBridge.supervisorTarget.alias,
+		};
+	}
+	return { alias: intercomBridge.orchestratorTarget };
 }
 
 function interruptAsyncRun(state: SubagentState, runId: string | undefined): AgentToolResult<Details> | null {
@@ -362,10 +381,19 @@ async function resumeAsyncRun(input: {
 	if (target.kind === "live") {
 		const delivered = await deliverSubagentIntercomMessageEvent(
 			input.deps.pi.events,
-			target.intercomTarget,
-			`Follow-up for async run ${target.runId} (${target.agent}):\n\n${followUp}`,
-			500,
-			{ source: "async-resume", runId: target.runId, agent: target.agent, index: target.index },
+			{
+				target: { alias: target.intercomTarget },
+				message: `Follow-up for async run ${target.runId} (${target.agent}):\n\n${followUp}`,
+				timeoutMs: 7000,
+				extra: {
+					ownerPiSessionId: input.ctx.sessionManager.getSessionId(),
+					source: "async-resume",
+					runId: target.runId,
+					agent: target.agent,
+					index: target.index,
+					waitForReadyMs: 5000,
+				},
+			},
 		);
 		if (delivered) {
 			return {
@@ -374,7 +402,7 @@ async function resumeAsyncRun(input: {
 			};
 		}
 		return {
-			content: [{ type: "text", text: [`Async child appears live but its intercom target is not registered.`, `Run: ${target.runId}`, `Intercom target: ${target.intercomTarget}`, `Wait for completion, then retry action='resume'.`].join("\n") }],
+			content: [{ type: "text", text: [`Async child follow-up was not delivered.`, `Run: ${target.runId}`, `Planned intercom target: ${target.intercomTarget}`, `Child may still be initializing, busy, or already finished.`, `Retry action='resume' or run action='status' for latest state.`].join("\n") }],
 			isError: true,
 			details: { mode: "management", results: [] },
 		};
@@ -394,13 +422,20 @@ async function resumeAsyncRun(input: {
 	const effectiveCwd = target.cwd ?? input.requestCwd;
 	const scope: AgentScope = "both";
 	const discoveredAgents = input.deps.discoverAgents(effectiveCwd, scope).agents;
-	const sessionName = resolveIntercomSessionTarget(input.deps.pi.getSessionName(), input.ctx.sessionManager.getSessionId());
-	const intercomBridge = resolveIntercomBridge({
-		config: input.deps.config.intercomBridge,
-		context: input.params.context,
-		orchestratorTarget: sessionName,
-		cwd: effectiveCwd,
-	});
+	let intercomBridge: IntercomBridgeState;
+	let supervisorTarget: SupervisorIntercomTarget | undefined;
+	try {
+		const resolved = await resolveSupervisorIntercomTarget({
+			deps: input.deps,
+			ctx: input.ctx,
+			effectiveCwd,
+			context: input.params.context,
+		});
+		intercomBridge = resolved.intercomBridge;
+		supervisorTarget = resolved.supervisorTarget;
+	} catch (error) {
+		return toExecutionErrorResult(input.params, error);
+	}
 	const agents = intercomBridge.active
 		? discoveredAgents.map((agent) => applyIntercomBridgeToAgent(agent, intercomBridge))
 		: discoveredAgents;
@@ -436,6 +471,7 @@ async function resumeAsyncRun(input: {
 		maxSubagentDepth: resolveCurrentMaxSubagentDepth(input.deps.config.maxSubagentDepth),
 		controlConfig: resolveControlConfig(input.deps.config.control, input.params.control),
 		controlIntercomTarget: intercomBridge.active ? intercomBridge.orchestratorTarget : undefined,
+		supervisorIntercomTarget: intercomBridge.active ? supervisorTarget : undefined,
 		childIntercomTarget: intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(runId, agent, index) : undefined,
 		availableModels,
 	});
@@ -464,9 +500,10 @@ function resultSummaryForIntercom(result: SingleResult): string {
 	return output || result.error || "(no output)";
 }
 
-function createForegroundControlNotifier(data: Pick<ExecutionContextData, "controlConfig" | "intercomBridge">, deps: Pick<ExecutorDeps, "pi">): (event: ControlEvent) => void {
+function createForegroundControlNotifier(data: Pick<ExecutionContextData, "controlConfig" | "intercomBridge" | "ctx">, deps: Pick<ExecutorDeps, "pi">): (event: ControlEvent) => void {
 	return (event) => emitControlNotification({
 		pi: deps.pi,
+		ownerPiSessionId: data.ctx.sessionManager.getSessionId(),
 		controlConfig: data.controlConfig,
 		intercomBridge: data.intercomBridge,
 		event,
@@ -475,13 +512,15 @@ function createForegroundControlNotifier(data: Pick<ExecutionContextData, "contr
 
 async function emitForegroundResultIntercom(input: {
 	pi: ExtensionAPI;
+	ownerPiSessionId: string;
 	intercomBridge: IntercomBridgeState;
 	runId: string;
 	mode: SubagentRunMode;
 	results: SingleResult[];
 	chainSteps?: number;
 }): Promise<ReturnType<typeof buildSubagentResultIntercomPayload> | null> {
-	if (!input.intercomBridge.active || !input.intercomBridge.orchestratorTarget) return null;
+	const relayTarget = resolveIntercomRelayTarget(input.intercomBridge);
+	if (!input.intercomBridge.active || !input.intercomBridge.orchestratorTarget || !relayTarget) return null;
 	const children = input.results.flatMap((result, index) => result.detached ? [] : [{
 		agent: result.agent,
 		status: resolveSubagentResultStatus({
@@ -497,6 +536,8 @@ async function emitForegroundResultIntercom(input: {
 	}]);
 	if (children.length === 0) return null;
 	const payload = buildSubagentResultIntercomPayload({
+		ownerPiSessionId: input.ownerPiSessionId,
+		target: relayTarget,
 		to: input.intercomBridge.orchestratorTarget,
 		runId: input.runId,
 		mode: input.mode,
@@ -511,6 +552,7 @@ async function emitForegroundResultIntercom(input: {
 
 async function maybeBuildForegroundIntercomReceipt(input: {
 	pi: ExtensionAPI;
+	ownerPiSessionId: string;
 	intercomBridge: IntercomBridgeState;
 	runId: string;
 	mode: SubagentRunMode;
@@ -518,6 +560,7 @@ async function maybeBuildForegroundIntercomReceipt(input: {
 }): Promise<{ text: string; details: Details } | null> {
 	const payload = await emitForegroundResultIntercom({
 		pi: input.pi,
+		ownerPiSessionId: input.ownerPiSessionId,
 		intercomBridge: input.intercomBridge,
 		runId: input.runId,
 		mode: input.mode,
@@ -555,6 +598,51 @@ function toExecutionErrorResult(params: SubagentParamsLike, error: unknown): Age
 		},
 		params.context,
 	);
+}
+
+async function resolveSupervisorIntercomTarget(input: {
+	deps: ExecutorDeps;
+	ctx: ExtensionContext;
+	effectiveCwd: string;
+	context: SubagentParamsLike["context"];
+}): Promise<{ intercomBridge: IntercomBridgeState; supervisorTarget?: SupervisorIntercomTarget }> {
+	const sessionAlias = resolveIntercomSessionTarget(input.deps.pi.getSessionName(), input.ctx.sessionManager.getSessionId());
+	const preliminary = resolveIntercomBridge({
+		config: input.deps.config.intercomBridge,
+		context: input.context,
+		orchestratorTarget: sessionAlias,
+		cwd: input.effectiveCwd,
+	});
+	if (!preliminary.active) {
+		return { intercomBridge: preliminary };
+	}
+
+	const resolver = getIntercomSupervisorTargetResolver(input.deps.pi);
+	if (!resolver) {
+		throw new Error("Subagent intercom bridge is active, but parent intercom registration failed: intercom runtime resolver is unavailable. Child was not launched because supervisor routing would be unsafe.");
+	}
+
+	let supervisorTarget: SupervisorIntercomTarget;
+	try {
+		supervisorTarget = await resolver.getSupervisorTarget(input.ctx.sessionManager.getSessionId());
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(`Subagent intercom bridge is active, but parent intercom registration failed: ${reason}. Child was not launched because supervisor routing would be unsafe.`);
+	}
+
+	const intercomBridge = resolveIntercomBridge({
+		config: input.deps.config.intercomBridge,
+		context: input.context,
+		orchestratorTarget: supervisorTarget.alias,
+		supervisorTarget,
+		cwd: input.effectiveCwd,
+	});
+
+	if (!intercomBridge.active) {
+		throw new Error("Subagent intercom bridge became inactive while resolving supervisor target.");
+	}
+
+	return { intercomBridge, supervisorTarget };
 }
 
 function collectChainSessionFiles(
@@ -642,6 +730,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 	const currentMaxSubagentDepth = resolveCurrentMaxSubagentDepth(deps.config.maxSubagentDepth);
 	const currentProvider = ctx.model?.provider;
 	const controlIntercomTarget = intercomBridge.active ? intercomBridge.orchestratorTarget : undefined;
+	const supervisorIntercomTarget = intercomBridge.active ? intercomBridge.supervisorTarget : undefined;
 	const childIntercomTarget = intercomBridge.active ? (agent: string, index: number) => resolveSubagentIntercomTarget(id, agent, index) : undefined;
 
 	if (hasTasks && params.tasks) {
@@ -682,6 +771,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			maxSubagentDepth: currentMaxSubagentDepth,
 			controlConfig,
 			controlIntercomTarget,
+			supervisorIntercomTarget,
 			childIntercomTarget,
 		});
 	}
@@ -707,6 +797,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			maxSubagentDepth: currentMaxSubagentDepth,
 			controlConfig,
 			controlIntercomTarget,
+			supervisorIntercomTarget,
 			childIntercomTarget,
 		});
 	}
@@ -748,6 +839,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			maxSubagentDepth,
 			controlConfig,
 			controlIntercomTarget,
+			supervisorIntercomTarget,
 			childIntercomTarget: childIntercomTarget ? (agent, index) => childIntercomTarget(agent, index) : undefined,
 		});
 	}
@@ -800,6 +892,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		childIntercomTarget: childIntercomTarget ? (agent, index) => childIntercomTarget(runId, agent, index) : undefined,
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 		orchestratorIntercomCwd: data.intercomBridge.active ? ctx.cwd : undefined,
+		supervisorIntercomTarget: data.intercomBridge.supervisorTarget,
 		foregroundControl,
 		chainSkills,
 		maxSubagentDepth: currentMaxSubagentDepth,
@@ -838,6 +931,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			maxSubagentDepth: currentMaxSubagentDepth,
 			controlConfig,
 			controlIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
+			supervisorIntercomTarget: data.intercomBridge.supervisorTarget,
 			childIntercomTarget: data.intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(id, agent, index) : undefined,
 		});
 	}
@@ -847,6 +941,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 	const intercomReceipt = chainDetails && !chainDetails.results.some((result) => result.interrupted || result.detached)
 		? await maybeBuildForegroundIntercomReceipt({
 			pi: deps.pi,
+			ownerPiSessionId: ctx.sessionManager.getSessionId(),
 			intercomBridge: data.intercomBridge,
 			runId,
 			mode: "chain",
@@ -890,6 +985,7 @@ interface ForegroundParallelRunInput {
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	orchestratorIntercomTarget?: string;
 	orchestratorIntercomCwd?: string;
+	supervisorIntercomTarget?: SupervisorIntercomTarget;
 	foregroundControl?: SubagentState["foregroundControls"] extends Map<string, infer T> ? T : never;
 	concurrencyLimit: number;
 	liveResults: (SingleResult | undefined)[];
@@ -982,6 +1078,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			intercomSessionName: input.childIntercomTarget?.(task.agent, index),
 			orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 			orchestratorIntercomCwd: input.orchestratorIntercomCwd,
+			supervisorIntercomTarget: input.supervisorIntercomTarget,
 			modelOverride: input.modelOverrides[index],
 			thinkingOverride: input.thinkingOverrides[index],
 			availableModels: input.availableModels,
@@ -1153,6 +1250,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			childIntercomTarget: childIntercomTarget ? (agent, index) => childIntercomTarget(runId, agent, index) : undefined,
 			orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 			orchestratorIntercomCwd: data.intercomBridge.active ? ctx.cwd : undefined,
+			supervisorIntercomTarget: data.intercomBridge.supervisorTarget,
 			foregroundControl,
 			concurrencyLimit: parallelConcurrency,
 			maxSubagentDepths,
@@ -1196,6 +1294,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 
 		const intercomReceipt = await maybeBuildForegroundIntercomReceipt({
 			pi: deps.pi,
+			ownerPiSessionId: ctx.sessionManager.getSessionId(),
 			intercomBridge: data.intercomBridge,
 			runId,
 			mode: "parallel",
@@ -1351,6 +1450,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		intercomSessionName: childIntercomTarget,
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 		orchestratorIntercomCwd: data.intercomBridge.active ? ctx.cwd : undefined,
+		supervisorIntercomTarget: data.intercomBridge.supervisorTarget,
 		index: 0,
 		modelOverride,
 		thinkingOverride,
@@ -1399,6 +1499,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	if (!r.detached && !r.interrupted) {
 		const intercomReceipt = await maybeBuildForegroundIntercomReceipt({
 			pi: deps.pi,
+			ownerPiSessionId: ctx.sessionManager.getSessionId(),
 			intercomBridge: data.intercomBridge,
 			runId,
 			mode: "single",
@@ -1510,13 +1611,17 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		const effectiveCwd = contextShape.effectiveCwd;
 		const parentSessionFile = ctx.sessionManager.getSessionFile() ?? null;
 		deps.state.currentSessionId = resolveCurrentSessionId(ctx.sessionManager);
-		const sessionName = resolveIntercomSessionTarget(deps.pi.getSessionName(), ctx.sessionManager.getSessionId());
-		const intercomBridge = resolveIntercomBridge({
-			config: deps.config.intercomBridge,
-			context: effectiveParams.context,
-			orchestratorTarget: sessionName,
-			cwd: effectiveCwd,
-		});
+		let intercomBridge: IntercomBridgeState;
+		try {
+			intercomBridge = (await resolveSupervisorIntercomTarget({
+				deps,
+				ctx,
+				effectiveCwd,
+				context: effectiveParams.context,
+			})).intercomBridge;
+		} catch (error) {
+			return toExecutionErrorResult(effectiveParams, error);
+		}
 		const agents = intercomBridge.active
 			? discoveredAgents.map((agent) => applyIntercomBridgeToAgent(agent, intercomBridge))
 			: discoveredAgents;

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import {
 	type Details,
+	type IntercomRelayTarget,
 	type IntercomEventBus,
 	type SingleResult,
 	type SubagentResultIntercomChild,
@@ -61,7 +62,9 @@ function resolveGroupedStatus(children: SubagentResultIntercomChild[]): Subagent
 }
 
 interface GroupedResultIntercomMessageInput {
-	to: string;
+	ownerPiSessionId: string;
+	target: IntercomRelayTarget;
+	to?: string;
 	runId: string;
 	mode: SubagentRunMode;
 	source: "foreground" | "async";
@@ -144,7 +147,9 @@ export function buildSubagentResultIntercomPayload(input: GroupedResultIntercomM
 	const summary = formatStatusCounts(countStatuses(children));
 	const firstChild = children[0];
 	const payload: SubagentResultIntercomPayload = {
-		to: input.to,
+		ownerPiSessionId: input.ownerPiSessionId,
+		target: input.target,
+		...(input.to ? { to: input.to } : {}),
 		runId: input.runId,
 		mode: input.mode,
 		status,
@@ -169,17 +174,29 @@ export async function deliverSubagentResultIntercomEvent(
 	payload: SubagentResultIntercomPayload,
 	timeoutMs = 500,
 ): Promise<boolean> {
-	return deliverSubagentIntercomMessageEvent(events, payload.to, payload.message, timeoutMs, payload);
+	return deliverSubagentIntercomMessageEvent(events, {
+		target: payload.target,
+		message: payload.message,
+		timeoutMs,
+		extra: payload,
+	});
 }
 
 export async function deliverSubagentIntercomMessageEvent(
 	events: IntercomEventBus,
-	to: string,
-	message: string,
-	timeoutMs = 500,
-	extra: Record<string, unknown> = {},
+	input: {
+		target: IntercomRelayTarget;
+		message: string;
+		timeoutMs?: number;
+		extra?: Record<string, unknown>;
+	},
 ): Promise<boolean> {
 	if (typeof events.on !== "function" || typeof events.emit !== "function") return false;
+	const timeoutMs = input.timeoutMs ?? 500;
+	const extra = input.extra ?? {};
+	const legacyTo = typeof extra.to === "string"
+		? extra.to
+		: input.target.alias ?? input.target.intercomSessionId ?? input.target.piSessionId;
 	const requestId = typeof extra.requestId === "string" ? extra.requestId : randomUUID();
 	return new Promise((resolve) => {
 		let settled = false;
@@ -200,7 +217,13 @@ export async function deliverSubagentIntercomMessageEvent(
 		});
 		timer = setTimeout(() => finish(false), timeoutMs);
 		try {
-			events.emit(SUBAGENT_RESULT_INTERCOM_EVENT, { ...extra, to, message, requestId });
+			events.emit(SUBAGENT_RESULT_INTERCOM_EVENT, {
+				...extra,
+				target: input.target,
+				...(legacyTo ? { to: legacyTo } : {}),
+				message: input.message,
+				requestId,
+			});
 		} catch {
 			finish(false);
 		}

@@ -21,9 +21,11 @@ import { buildModelCandidates, resolveModelCandidate, type AvailableModelInfo } 
 import {
 	type ArtifactConfig,
 	type Details,
+	type IntercomRelayTarget,
 	type MaxOutputConfig,
 	type ResolvedControlConfig,
 	type SubagentRunMode,
+	type SupervisorIntercomTarget,
 	ASYNC_DIR,
 	RESULTS_DIR,
 	SUBAGENT_ASYNC_STARTED_EVENT,
@@ -79,6 +81,8 @@ interface AsyncChainParams {
 	maxSubagentDepth: number;
 	controlConfig?: ResolvedControlConfig;
 	controlIntercomTarget?: string;
+	controlIntercomTargetDescriptor?: IntercomRelayTarget;
+	supervisorIntercomTarget?: SupervisorIntercomTarget;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 }
 
@@ -103,6 +107,8 @@ interface AsyncSingleParams {
 	maxSubagentDepth: number;
 	controlConfig?: ResolvedControlConfig;
 	controlIntercomTarget?: string;
+	controlIntercomTargetDescriptor?: IntercomRelayTarget;
+	supervisorIntercomTarget?: SupervisorIntercomTarget;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 }
 
@@ -180,6 +186,23 @@ const UNAVAILABLE_SUBAGENT_SKILL_ERROR = "Skills not found: pi-subagents";
 class UnavailableSubagentSkillError extends Error {}
 class AsyncStartValidationError extends Error {}
 
+function resolveControlRelayTarget(input: {
+	controlIntercomTarget?: string;
+	controlIntercomTargetDescriptor?: IntercomRelayTarget;
+	supervisorIntercomTarget?: SupervisorIntercomTarget;
+}): IntercomRelayTarget | undefined {
+	if (input.controlIntercomTargetDescriptor) return input.controlIntercomTargetDescriptor;
+	if (input.supervisorIntercomTarget) {
+		return {
+			intercomSessionId: input.supervisorIntercomTarget.intercomSessionId,
+			piSessionId: input.supervisorIntercomTarget.piSessionId,
+			alias: input.supervisorIntercomTarget.alias,
+		};
+	}
+	if (input.controlIntercomTarget) return { alias: input.controlIntercomTarget };
+	return undefined;
+}
+
 /**
  * Execute a chain asynchronously
  */
@@ -201,6 +224,8 @@ export function executeAsyncChain(
 		maxSubagentDepth,
 		controlConfig,
 		controlIntercomTarget,
+		controlIntercomTargetDescriptor,
+		supervisorIntercomTarget,
 		childIntercomTarget,
 	} = params;
 	const resultMode = params.resultMode ?? "chain";
@@ -333,6 +358,11 @@ export function executeAsyncChain(
 	}) : undefined;
 
 	let spawnResult: { pid?: number; error?: string } = {};
+	const relayTarget = resolveControlRelayTarget({
+		controlIntercomTarget,
+		controlIntercomTargetDescriptor,
+		supervisorIntercomTarget,
+	});
 	try {
 		spawnResult = spawnRunner(
 			{
@@ -352,6 +382,8 @@ export function executeAsyncChain(
 				piArgv1: process.argv[1],
 				controlConfig,
 				controlIntercomTarget,
+				controlIntercomTargetDescriptor: relayTarget,
+				supervisorIntercomTarget,
 				childIntercomTargets,
 				resultMode,
 			},
@@ -439,6 +471,8 @@ export function executeAsyncSingle(
 		maxSubagentDepth,
 		controlConfig,
 		controlIntercomTarget,
+		controlIntercomTargetDescriptor,
+		supervisorIntercomTarget,
 		childIntercomTarget,
 	} = params;
 	const task = params.task ?? "";
@@ -470,6 +504,11 @@ export function executeAsyncSingle(
 	const validationError = validateFileOnlyOutputMode(outputMode, outputPath, `Async single run (${agent})`);
 	if (validationError) return formatAsyncStartError("single", validationError);
 	const taskWithOutputInstruction = injectSingleOutputInstruction(task, outputPath);
+	const relayTarget = resolveControlRelayTarget({
+		controlIntercomTarget,
+		controlIntercomTargetDescriptor,
+		supervisorIntercomTarget,
+	});
 	let spawnResult: { pid?: number; error?: string } = {};
 	try {
 		spawnResult = spawnRunner(
@@ -512,6 +551,8 @@ export function executeAsyncSingle(
 				piArgv1: process.argv[1],
 				controlConfig,
 				controlIntercomTarget,
+				controlIntercomTargetDescriptor: relayTarget,
+				supervisorIntercomTarget,
 				childIntercomTargets: childIntercomTarget ? [childIntercomTarget(agent, 0)] : undefined,
 				resultMode: "single",
 			},

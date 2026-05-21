@@ -76,6 +76,13 @@ export interface ControlEvent {
 	recentFailureSummary?: string;
 }
 
+export interface SupervisorIntercomTarget {
+	piSessionId: string;
+	intercomSessionId: string;
+	alias: string;
+	cwd: string;
+}
+
 export type SubagentResultStatus = "completed" | "failed" | "paused" | "detached";
 export type SubagentRunMode = "single" | "parallel" | "chain";
 
@@ -89,8 +96,17 @@ export interface SubagentResultIntercomChild {
 	intercomTarget?: string;
 }
 
+export interface IntercomRelayTarget {
+	intercomSessionId?: string;
+	piSessionId?: string;
+	alias?: string;
+	namespace?: string;
+}
+
 export interface SubagentResultIntercomPayload {
-	to: string;
+	ownerPiSessionId: string;
+	target: IntercomRelayTarget;
+	to?: string;
 	message: string;
 	requestId?: string;
 	runId: string;
@@ -443,6 +459,7 @@ export interface RunSyncOptions {
 	intercomSessionName?: string;
 	orchestratorIntercomTarget?: string;
 	orchestratorIntercomCwd?: string;
+	supervisorIntercomTarget?: SupervisorIntercomTarget;
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
 	artifactConfig?: ArtifactConfig;

@@ -1,5 +1,22 @@
+export interface SessionReadiness {
+  state: "initializing" | "ready" | "stopping";
+  reason?: string;
+  updatedAt: number;
+}
+
+export interface SessionSubagentMetadata {
+  ownerPiSessionId: string;
+  runId: string;
+  agent: string;
+  index: number;
+}
+
 export interface SessionInfo {
   id: string;
+  piSessionId?: string;
+  protocolVersion?: number;
+  capabilities?: string[];
+  namespace?: string;
   name?: string;
   cwd: string;
   model: string;
@@ -7,11 +24,18 @@ export interface SessionInfo {
   startedAt: number;
   lastActivity: number;
   status?: string;
+  readiness?: SessionReadiness;
+  subagent?: SessionSubagentMetadata;
 }
 
 export interface Message {
   id: string;
   timestamp: number;
+  to?: {
+    intercomSessionId?: string;
+    piSessionId?: string;
+    alias?: string;
+  };
   replyTo?: string;
   expectsReply?: boolean;
   content: {
@@ -27,12 +51,26 @@ export interface Attachment {
   language?: string;
 }
 
+export interface SendTargetEnvelope {
+  intercomSessionId?: string;
+  piSessionId?: string;
+  alias?: string;
+  namespace?: string;
+}
+
 export type ClientMessage =
   | { type: "register"; session: Omit<SessionInfo, "id"> }
   | { type: "unregister" }
   | { type: "list"; requestId: string }
-  | { type: "send"; to: string; message: Message }
-  | { type: "presence"; name?: string; status?: string; model?: string };
+  | { type: "send"; to: string | SendTargetEnvelope; message: Message }
+  | {
+    type: "presence";
+    name?: string;
+    status?: string;
+    model?: string;
+    readiness?: SessionReadiness;
+    subagent?: SessionSubagentMetadata;
+  };
 
 export type BrokerMessage =
   | { type: "registered"; sessionId: string }

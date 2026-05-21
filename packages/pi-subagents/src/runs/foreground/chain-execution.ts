@@ -30,6 +30,7 @@ import {
 	type IntercomEventBus,
 	type ResolvedControlConfig,
 	type SingleResult,
+	type SupervisorIntercomTarget,
 	MAX_CONCURRENCY,
 	resolveChildMaxSubagentDepth,
 } from "../../shared/types.ts";
@@ -59,6 +60,7 @@ interface ChainExecutionParams {
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	orchestratorIntercomTarget?: string;
 	orchestratorIntercomCwd?: string;
+	supervisorIntercomTarget?: SupervisorIntercomTarget;
 	foregroundControl?: {
 		updatedAt: number;
 		currentAgent?: string;
@@ -234,6 +236,7 @@ async function runChainChild(input: {
 		intercomSessionName: params.childIntercomTarget?.(agentName, globalIndex),
 		orchestratorIntercomTarget: params.orchestratorIntercomTarget,
 		orchestratorIntercomCwd: params.orchestratorIntercomCwd,
+		supervisorIntercomTarget: params.supervisorIntercomTarget,
 		artifactsDir: params.artifactsDir,
 		artifactConfig: params.artifactConfig,
 		runId: params.runId,

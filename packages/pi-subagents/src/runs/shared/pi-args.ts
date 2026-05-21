@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { SupervisorIntercomTarget } from "../../shared/types.ts";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const TASK_ARG_LIMIT = 8000;
@@ -9,6 +10,10 @@ const PROMPT_RUNTIME_EXTENSION_PATH = path.join(path.dirname(fileURLToPath(impor
 export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
 export const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET";
 export const SUBAGENT_ORCHESTRATOR_CWD_ENV = "PI_SUBAGENT_ORCHESTRATOR_CWD";
+export const SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID_ENV = "PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID";
+export const SUBAGENT_SUPERVISOR_PI_SESSION_ID_ENV = "PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID";
+export const SUBAGENT_SUPERVISOR_ALIAS_ENV = "PI_SUBAGENT_SUPERVISOR_ALIAS";
+export const SUBAGENT_SUPERVISOR_CWD_ENV = "PI_SUBAGENT_SUPERVISOR_CWD";
 export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 export const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 export const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
@@ -32,6 +37,7 @@ export interface BuildPiArgsInput {
 	intercomSessionName?: string;
 	orchestratorIntercomTarget?: string;
 	orchestratorIntercomCwd?: string;
+	supervisorIntercomTarget?: SupervisorIntercomTarget;
 	runId?: string;
 	childAgentName?: string;
 	childIndex?: number;
@@ -134,6 +140,12 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	}
 	if (input.orchestratorIntercomCwd) {
 		env[SUBAGENT_ORCHESTRATOR_CWD_ENV] = input.orchestratorIntercomCwd;
+	}
+	if (input.supervisorIntercomTarget) {
+		env[SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID_ENV] = input.supervisorIntercomTarget.intercomSessionId;
+		env[SUBAGENT_SUPERVISOR_PI_SESSION_ID_ENV] = input.supervisorIntercomTarget.piSessionId;
+		env[SUBAGENT_SUPERVISOR_ALIAS_ENV] = input.supervisorIntercomTarget.alias;
+		env[SUBAGENT_SUPERVISOR_CWD_ENV] = input.supervisorIntercomTarget.cwd;
 	}
 	if (input.runId) {
 		env[SUBAGENT_RUN_ID_ENV] = input.runId;

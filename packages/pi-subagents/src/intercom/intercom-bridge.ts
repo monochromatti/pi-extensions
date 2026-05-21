@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentConfig } from "../agents/agents.ts";
-import type { ExtensionConfig, IntercomBridgeConfig, IntercomBridgeMode } from "../shared/types.ts";
+import type { ExtensionConfig, IntercomBridgeConfig, IntercomBridgeMode, SupervisorIntercomTarget } from "../shared/types.ts";
 
 const PI_INTERCOM_PACKAGE_NAME = "pi-intercom";
 const CONFIG_DIR = ".pi";
@@ -41,6 +41,7 @@ export interface IntercomBridgeState {
 	active: boolean;
 	mode: IntercomBridgeMode;
 	orchestratorTarget?: string;
+	supervisorTarget?: SupervisorIntercomTarget;
 	extensionDir: string;
 	instruction: string;
 }
@@ -53,6 +54,7 @@ export interface IntercomBridgeDiagnostic {
 	extensionDir: string;
 	configPath?: string;
 	orchestratorTarget?: string;
+	supervisorTarget?: SupervisorIntercomTarget;
 	reason?: string;
 	intercomConfigEnabled?: boolean;
 	intercomConfigError?: string;
@@ -62,6 +64,7 @@ interface ResolveIntercomBridgeInput {
 	config: ExtensionConfig["intercomBridge"];
 	context: "fresh" | "fork" | undefined;
 	orchestratorTarget?: string;
+	supervisorTarget?: SupervisorIntercomTarget;
 	extensionDir?: string;
 	configPath?: string;
 	settingsDir?: string;
@@ -302,6 +305,7 @@ export function diagnoseIntercomBridge(input: ResolveIntercomBridgeInput): Inter
 		extensionDir,
 		configPath,
 		...(orchestratorTarget ? { orchestratorTarget } : {}),
+		...(input.supervisorTarget ? { supervisorTarget: input.supervisorTarget } : {}),
 		...(reason ? { reason } : {}),
 		...(configStatus ? { intercomConfigEnabled: configStatus.enabled } : {}),
 		...(intercomConfigError ? { intercomConfigError } : {}),
@@ -349,6 +353,7 @@ export function resolveIntercomBridge(input: ResolveIntercomBridgeInput): Interc
 		active: true,
 		mode,
 		orchestratorTarget,
+		...(input.supervisorTarget ? { supervisorTarget: input.supervisorTarget } : {}),
 		extensionDir,
 		instruction,
 	};

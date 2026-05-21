@@ -3,9 +3,14 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerSocketPath } from "./paths.ts";
-import type { SessionInfo, Message, Attachment } from "../types.ts";
-
-const BROKER_SOCKET = getBrokerSocketPath();
+import type {
+  SessionInfo,
+  SessionReadiness,
+  SessionSubagentMetadata,
+  Message,
+  Attachment,
+  SendTargetEnvelope,
+} from "../types.ts";
 
 interface SendOptions {
   text: string;
@@ -58,6 +63,22 @@ function isMessage(value: unknown): value is Message {
     return false;
   }
 
+  if (message.to !== undefined) {
+    if (typeof message.to !== "object" || message.to === null) {
+      return false;
+    }
+    const to = message.to as Record<string, unknown>;
+    if (to.intercomSessionId !== undefined && typeof to.intercomSessionId !== "string") {
+      return false;
+    }
+    if (to.piSessionId !== undefined && typeof to.piSessionId !== "string") {
+      return false;
+    }
+    if (to.alias !== undefined && typeof to.alias !== "string") {
+      return false;
+    }
+  }
+
   if (message.replyTo !== undefined && typeof message.replyTo !== "string") {
     return false;
   }
@@ -79,6 +100,37 @@ function isMessage(value: unknown): value is Message {
     || (Array.isArray(content.attachments) && content.attachments.every(isAttachment));
 }
 
+function isSessionReadiness(value: unknown): value is SessionReadiness {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const readiness = value as Record<string, unknown>;
+  if (
+    readiness.state !== "initializing"
+    && readiness.state !== "ready"
+    && readiness.state !== "stopping"
+  ) {
+    return false;
+  }
+  if (readiness.reason !== undefined && typeof readiness.reason !== "string") {
+    return false;
+  }
+  return typeof readiness.updatedAt === "number";
+}
+
+function isSessionSubagentMetadata(value: unknown): value is SessionSubagentMetadata {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const subagent = value as Record<string, unknown>;
+  return typeof subagent.ownerPiSessionId === "string"
+    && typeof subagent.runId === "string"
+    && typeof subagent.agent === "string"
+    && typeof subagent.index === "number"
+    && Number.isInteger(subagent.index)
+    && subagent.index >= 0;
+}
+
 function isSessionInfo(value: unknown): value is SessionInfo {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -98,6 +150,26 @@ function isSessionInfo(value: unknown): value is SessionInfo {
   }
 
   if (session.name !== undefined && typeof session.name !== "string") {
+    return false;
+  }
+
+  if (session.namespace !== undefined && typeof session.namespace !== "string") {
+    return false;
+  }
+
+  if (session.piSessionId !== undefined && typeof session.piSessionId !== "string") {
+    return false;
+  }
+  if (session.protocolVersion !== undefined && typeof session.protocolVersion !== "number") {
+    return false;
+  }
+  if (session.capabilities !== undefined && (!Array.isArray(session.capabilities) || !session.capabilities.every(capability => typeof capability === "string"))) {
+    return false;
+  }
+  if (session.readiness !== undefined && !isSessionReadiness(session.readiness)) {
+    return false;
+  }
+  if (session.subagent !== undefined && !isSessionSubagentMetadata(session.subagent)) {
     return false;
   }
 
@@ -155,7 +227,7 @@ export class IntercomClient extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      const socket = net.connect(BROKER_SOCKET);
+      const socket = net.connect(getBrokerSocketPath());
       this.socket = socket;
       this.disconnectError = null;
       let settled = false;
@@ -473,7 +545,7 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
-  send(to: string, options: SendOptions): Promise<SendResult> {
+  send(to: string | SendTargetEnvelope, options: SendOptions): Promise<SendResult> {
     let socket: net.Socket;
     try {
       socket = this.requireActiveSocket();
@@ -520,7 +592,13 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
-  updatePresence(updates: { name?: string; status?: string; model?: string }): void {
+  updatePresence(updates: {
+    name?: string;
+    status?: string;
+    model?: string;
+    readiness?: SessionReadiness;
+    subagent?: SessionSubagentMetadata;
+  }): void {
     if (this.disconnecting) {
       return;
     }

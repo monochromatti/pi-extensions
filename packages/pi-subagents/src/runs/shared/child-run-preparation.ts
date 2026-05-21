@@ -6,6 +6,7 @@ import {
 	type BuildPiArgsInput,
 	type BuildPiArgsResult,
 } from "./pi-args.ts";
+import type { SupervisorIntercomTarget } from "../../shared/types.ts";
 
 /**
  * Module: child-run preparation.
@@ -44,6 +45,7 @@ export interface ChildRunSupervisor {
 	childIntercomTarget?: string;
 	orchestratorIntercomTarget?: string;
 	orchestratorIntercomCwd?: string;
+	supervisorIntercomTarget?: SupervisorIntercomTarget;
 }
 
 export interface ChildRunRequest {
@@ -101,6 +103,7 @@ export function prepareChildRun(
 		intercomSessionName: request.supervisor?.childIntercomTarget,
 		orchestratorIntercomTarget: request.supervisor?.orchestratorIntercomTarget,
 		orchestratorIntercomCwd: request.supervisor?.orchestratorIntercomCwd,
+		supervisorIntercomTarget: request.supervisor?.supervisorIntercomTarget,
 		runId: request.identity.runId,
 		childAgentName: request.identity.agentName,
 		childIndex: request.identity.childIndex,

@@ -147,7 +147,7 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				const stepOutputPath = path.join(asyncDir, `output-${index}.log`);
 				if (stepOutputPath !== outputPath && fs.existsSync(stepOutputPath)) lines.push(`  Output: ${stepOutputPath}`);
 				if (step.status === "running") {
-					lines.push(`  Intercom target: ${resolveSubagentIntercomTarget(status.runId, step.agent, index)} (if registered)`);
+					lines.push(`  Planned intercom target: ${resolveSubagentIntercomTarget(status.runId, step.agent, index)} (registration/readiness not guaranteed)`);
 				}
 			}
 			if (status.state !== "running" && outputPath && fs.existsSync(outputPath)) {

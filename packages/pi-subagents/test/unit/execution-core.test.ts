@@ -9,6 +9,10 @@ import {
   SUBAGENT_CHILD_ENV,
   SUBAGENT_CHILD_INDEX_ENV,
   SUBAGENT_ORCHESTRATOR_TARGET_ENV,
+  SUBAGENT_SUPERVISOR_ALIAS_ENV,
+  SUBAGENT_SUPERVISOR_CWD_ENV,
+  SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID_ENV,
+  SUBAGENT_SUPERVISOR_PI_SESSION_ID_ENV,
   SUBAGENT_RUN_ID_ENV,
   buildPiArgs,
 } from "../../src/runs/shared/pi-args.ts";
@@ -72,7 +76,7 @@ test("3.5/3.6 single output path resolves relative to requested cwd", () => {
   assert.equal(resolveSingleOutputPath("/tmp/report.md", runtimeCwd, requestedCwd), "/tmp/report.md");
 });
 
-test("3.7/3.8 child args include subagent metadata env for supervisor routing", () => {
+test("3.7/3.8 + 4.5/4.6 child args include subagent metadata env and structured supervisor target", () => {
   const { args, env } = buildPiArgs({
     baseArgs: ["--no-color"],
     task: "echo hi",
@@ -81,6 +85,12 @@ test("3.7/3.8 child args include subagent metadata env for supervisor routing", 
     inheritSkills: false,
     intercomSessionName: "child-session",
     orchestratorIntercomTarget: "parent-session",
+    supervisorIntercomTarget: {
+      intercomSessionId: "parent-intercom-id",
+      piSessionId: "parent-pi-id",
+      alias: "parent-session",
+      cwd: "/repo/parent",
+    },
     runId: "run-123",
     childAgentName: "worker",
     childIndex: 2,
@@ -89,6 +99,10 @@ test("3.7/3.8 child args include subagent metadata env for supervisor routing", 
   assert.equal(env[SUBAGENT_CHILD_ENV], "1");
   assert.equal(env.PI_SUBAGENT_INTERCOM_SESSION_NAME, "child-session");
   assert.equal(env[SUBAGENT_ORCHESTRATOR_TARGET_ENV], "parent-session");
+  assert.equal(env[SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID_ENV], "parent-intercom-id");
+  assert.equal(env[SUBAGENT_SUPERVISOR_PI_SESSION_ID_ENV], "parent-pi-id");
+  assert.equal(env[SUBAGENT_SUPERVISOR_ALIAS_ENV], "parent-session");
+  assert.equal(env[SUBAGENT_SUPERVISOR_CWD_ENV], "/repo/parent");
   assert.equal(env[SUBAGENT_RUN_ID_ENV], "run-123");
   assert.equal(env[SUBAGENT_CHILD_AGENT_ENV], "worker");
   assert.equal(env[SUBAGENT_CHILD_INDEX_ENV], "2");

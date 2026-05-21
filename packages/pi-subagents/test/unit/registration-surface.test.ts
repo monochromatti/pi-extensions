@@ -6,6 +6,10 @@ const CHILD_ENV_KEYS = [
 	"PI_SUBAGENT_CHILD",
 	"PI_SUBAGENT_ORCHESTRATOR_TARGET",
 	"PI_SUBAGENT_ORCHESTRATOR_CWD",
+	"PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID",
+	"PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID",
+	"PI_SUBAGENT_SUPERVISOR_ALIAS",
+	"PI_SUBAGENT_SUPERVISOR_CWD",
 	"PI_SUBAGENT_RUN_ID",
 	"PI_SUBAGENT_CHILD_AGENT",
 	"PI_SUBAGENT_CHILD_INDEX",
@@ -92,6 +96,10 @@ test("8.3 child subagent session registers contact_supervisor", () => {
 	withEnv({
 		PI_SUBAGENT_CHILD: "1",
 		PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-session",
+		PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: "parent-intercom",
+		PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: "parent-pi",
+		PI_SUBAGENT_SUPERVISOR_ALIAS: "parent-session",
+		PI_SUBAGENT_SUPERVISOR_CWD: "/repo/parent",
 		PI_SUBAGENT_RUN_ID: "run-123",
 		PI_SUBAGENT_CHILD_AGENT: "worker",
 		PI_SUBAGENT_CHILD_INDEX: "0",
@@ -102,6 +110,40 @@ test("8.3 child subagent session registers contact_supervisor", () => {
 		assert.deepEqual(toolNames(fake.tools), ["contact_supervisor", "intercom"]);
 		assert.deepEqual(fake.commands, []);
 		assert.deepEqual(fake.shortcuts, []);
+	});
+});
+
+test("8.4 child subagent session with partial PI_SUBAGENT_SUPERVISOR_* metadata fails safe and does not register contact_supervisor", () => {
+	withEnv({
+		PI_SUBAGENT_CHILD: "1",
+		PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-session",
+		PI_SUBAGENT_ORCHESTRATOR_CWD: "/repo/parent",
+		PI_SUBAGENT_SUPERVISOR_ALIAS: "parent-session",
+		PI_SUBAGENT_RUN_ID: "run-123",
+		PI_SUBAGENT_CHILD_AGENT: "worker",
+		PI_SUBAGENT_CHILD_INDEX: "0",
+	}, () => {
+		const fake = createFakePi();
+		registerSubagentExtension(fake.pi);
+
+		assert.deepEqual(toolNames(fake.tools), ["intercom"]);
+		assert.equal(fake.tools.some((tool) => tool.name === "contact_supervisor"), false);
+	});
+});
+
+test("8.4 legacy-only child env still registers contact_supervisor", () => {
+	withEnv({
+		PI_SUBAGENT_CHILD: "1",
+		PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-session",
+		PI_SUBAGENT_ORCHESTRATOR_CWD: "/repo/parent",
+		PI_SUBAGENT_RUN_ID: "run-legacy",
+		PI_SUBAGENT_CHILD_AGENT: "worker",
+		PI_SUBAGENT_CHILD_INDEX: "1",
+	}, () => {
+		const fake = createFakePi();
+		registerSubagentExtension(fake.pi);
+
+		assert.deepEqual(toolNames(fake.tools), ["contact_supervisor", "intercom"]);
 	});
 });
 
@@ -119,6 +161,10 @@ test("8.3 contact_supervisor reason schema exposes child-only reasons", () => {
 	withEnv({
 		PI_SUBAGENT_CHILD: "1",
 		PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-session",
+		PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: "parent-intercom",
+		PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: "parent-pi",
+		PI_SUBAGENT_SUPERVISOR_ALIAS: "parent-session",
+		PI_SUBAGENT_SUPERVISOR_CWD: "/repo/parent",
 		PI_SUBAGENT_RUN_ID: "run-123",
 		PI_SUBAGENT_CHILD_AGENT: "worker",
 		PI_SUBAGENT_CHILD_INDEX: "0",

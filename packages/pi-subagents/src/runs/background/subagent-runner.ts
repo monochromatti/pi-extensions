@@ -16,9 +16,11 @@ import {
 	type ArtifactPaths,
 	type AsyncParallelGroupStatus,
 	type AsyncStatus,
+	type IntercomRelayTarget,
 	type ModelAttempt,
 	type ResolvedControlConfig,
 	type SubagentRunMode,
+	type SupervisorIntercomTarget,
 	type Usage,
 	DEFAULT_MAX_OUTPUT,
 	type MaxOutputConfig,
@@ -81,6 +83,8 @@ interface SubagentRunConfig {
 	piArgv1?: string;
 	controlConfig?: ResolvedControlConfig;
 	controlIntercomTarget?: string;
+	controlIntercomTargetDescriptor?: IntercomRelayTarget;
+	supervisorIntercomTarget?: SupervisorIntercomTarget;
 	childIntercomTargets?: Array<string | undefined>;
 	resultMode?: SubagentRunMode;
 }
@@ -549,7 +553,7 @@ interface SingleStepContext {
 	piArgv1?: string;
 	registerInterrupt?: (interrupt: (() => void) | undefined) => void;
 	childIntercomTarget?: string;
-	orchestratorIntercomTarget?: string;
+	supervisorIntercomTarget?: SupervisorIntercomTarget;
 	onChildEvent?: (event: ChildEvent) => void;
 }
 
@@ -627,8 +631,9 @@ async function runSingleStep(
 			},
 			supervisor: {
 				childIntercomTarget: ctx.childIntercomTarget,
-				orchestratorIntercomTarget: ctx.orchestratorIntercomTarget,
-				orchestratorIntercomCwd: ctx.cwd,
+				orchestratorIntercomTarget: ctx.supervisorIntercomTarget?.alias,
+				orchestratorIntercomCwd: ctx.supervisorIntercomTarget?.cwd,
+				supervisorIntercomTarget: ctx.supervisorIntercomTarget,
 			},
 		});
 		const run = await runPiStreaming(
@@ -883,6 +888,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const appendControlEvent = (event: ReturnType<typeof buildControlEvent>) => {
 		if (!controlConfig.enabled) return;
 		const childIntercomTarget = config.childIntercomTargets?.[event.index ?? statusPayload.currentStep];
+		const relayTarget = config.controlIntercomTargetDescriptor
+			?? (config.controlIntercomTarget ? { alias: config.controlIntercomTarget } : undefined);
 		const channels = event.type === "active_long_running"
 			? controlConfig.notifyChannels.filter((channel) => channel !== "intercom")
 			: controlConfig.notifyChannels;
@@ -893,9 +900,11 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			channels,
 			childIntercomTarget,
 			noticeText: formatControlNoticeMessage(event, childIntercomTarget),
-			...(config.controlIntercomTarget && channels.includes("intercom") ? {
+			...(relayTarget && channels.includes("intercom") ? {
 				intercom: {
 					to: config.controlIntercomTarget,
+					target: relayTarget,
+					...(config.sessionId ? { ownerPiSessionId: config.sessionId } : {}),
 					message: formatControlIntercomMessage(event, childIntercomTarget),
 				},
 			} : {}),
@@ -1214,7 +1223,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							piPackageRoot: config.piPackageRoot,
 							piArgv1: config.piArgv1,
 							childIntercomTarget: config.childIntercomTargets?.[fi],
-							orchestratorIntercomTarget: config.controlIntercomTarget,
+							supervisorIntercomTarget: config.supervisorIntercomTarget,
 							registerInterrupt: (interrupt) => {
 								activeChildInterrupt = interrupt;
 							},
@@ -1353,7 +1362,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				piPackageRoot: config.piPackageRoot,
 				piArgv1: config.piArgv1,
 				childIntercomTarget: config.childIntercomTargets?.[flatIndex],
-				orchestratorIntercomTarget: config.controlIntercomTarget,
+				supervisorIntercomTarget: config.supervisorIntercomTarget,
 				registerInterrupt: (interrupt) => {
 					activeChildInterrupt = interrupt;
 				},
@@ -1574,8 +1583,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			cwd,
 			asyncDir,
 			sessionId: config.sessionId,
+			ownerPiSessionId: config.sessionId,
 			sessionFile: effectiveSessionFile,
 			intercomTarget: config.controlIntercomTarget,
+			intercomTargetDescriptor: config.controlIntercomTargetDescriptor,
 			shareUrl,
 			gistUrl,
 			shareError,

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createEventBus, discoverAndLoadExtensions, ExtensionRunner } from "@earendil-works/pi-coding-agent";
+import { IntercomClient } from "../../src/intercom-public/broker/client.ts";
 
 const packageDir = process.cwd().endsWith(path.join("packages", "pi-subagents"))
 	? process.cwd()
@@ -29,6 +30,10 @@ const CHILD_ENV_KEYS = [
 	"PI_SUBAGENT_CHILD",
 	"PI_SUBAGENT_ORCHESTRATOR_TARGET",
 	"PI_SUBAGENT_ORCHESTRATOR_CWD",
+	"PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID",
+	"PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID",
+	"PI_SUBAGENT_SUPERVISOR_ALIAS",
+	"PI_SUBAGENT_SUPERVISOR_CWD",
 	"PI_SUBAGENT_RUN_ID",
 	"PI_SUBAGENT_CHILD_AGENT",
 	"PI_SUBAGENT_CHILD_INDEX",
@@ -132,7 +137,7 @@ async function withChildEnv<T>(env: Record<string, string | undefined>, fn: () =
 	}
 }
 
-async function createHarness(sessionName: string, options: { idle?: boolean } = {}) {
+async function createHarness(sessionName: string, options: { idle?: boolean; sessionIdPrefix?: string; stableSessionId?: boolean } = {}) {
 	// Use Pi's real extension loader/runner so tests exercise lifecycle, context,
 	// and tool registration semantics while keeping model/session behavior mocked.
 	const sentMessages: Array<{ message: { customType?: string; content?: string; details?: unknown }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
@@ -150,7 +155,7 @@ async function createHarness(sessionName: string, options: { idle?: boolean } = 
 
 	const sessionManager = {
 		getSessionFile: () => null,
-		getSessionId: () => `${sessionName}-session-${sessionCounter}`,
+		getSessionId: () => `${options.sessionIdPrefix ?? sessionName}-session-${sessionCounter}`,
 	};
 	const modelRegistry = {
 		getAvailable: () => [],
@@ -205,7 +210,9 @@ async function createHarness(sessionName: string, options: { idle?: boolean } = 
 		},
 		async shutdown() {
 			await runner.emit({ type: "session_shutdown" } as never);
-			sessionCounter += 1;
+			if (!options.stableSessionId) {
+				sessionCounter += 1;
+			}
 		},
 		tool(name: string): CapturedTool {
 			const tool = runner.getToolDefinition(name) as CapturedTool | undefined;
@@ -217,6 +224,26 @@ async function createHarness(sessionName: string, options: { idle?: boolean } = 
 
 function text(result: CapturedToolResult): string {
 	return result.content.map((part) => part.text).join("\n");
+}
+
+function parseStatusSessionId(result: CapturedToolResult): string {
+	const match = text(result).match(/Session ID: (.+)/);
+	assert.ok(match, `Unable to parse Session ID from status: ${text(result)}`);
+	return match[1]!.trim();
+}
+
+async function connectLegacyClient(name: string): Promise<IntercomClient> {
+	const client = new IntercomClient();
+	await client.connect({
+		name,
+		cwd: `/tmp/${name}`,
+		model: "legacy-model",
+		pid: process.pid,
+		startedAt: Date.now(),
+		lastActivity: Date.now(),
+		status: "idle",
+	});
+	return client;
 }
 
 test("7.5/7.6 intercom send delivers message and records pending inbound ask", { concurrency: false }, async () => {
@@ -278,6 +305,199 @@ test("7.7/7.8 intercom ask waits for reply tool response", { concurrency: false 
 	});
 });
 
+test("7.11/7.12 intercom ask waits for late target registration before failing", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const asker = await createHarness("late-asker");
+		let answerer: Awaited<ReturnType<typeof createHarness>> | null = null;
+		try {
+			await asker.start();
+			const askPromise = asker.tool("intercom").execute("ask-late", {
+				action: "ask",
+				to: "late-answerer",
+				message: "late-registration-question",
+			}, new AbortController().signal, undefined, asker.ctx);
+
+			await wait(350);
+			answerer = await createHarness("late-answerer");
+			await answerer.start();
+			await waitUntil(() => answerer!.sentMessages.some((entry) => entry.message.content?.includes("late-registration-question")), "late answerer did not receive ask");
+
+			const reply = await answerer.tool("intercom").execute("reply-late", {
+				action: "reply",
+				message: "late-registration-answer",
+			}, new AbortController().signal, undefined, answerer.ctx);
+			assert.equal(reply.isError, false);
+
+			const askResult = await askPromise;
+			assert.equal(askResult.isError, false, text(askResult));
+			assert.match(text(askResult), /late-registration-answer/);
+		} finally {
+			if (answerer) await answerer.shutdown();
+			await asker.shutdown();
+		}
+	});
+});
+
+test("7.13/7.14 intercom ask honors waitForReadyMs override when set to zero", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const asker = await createHarness("zero-wait-asker");
+		let answerer: Awaited<ReturnType<typeof createHarness>> | null = null;
+		try {
+			await asker.start();
+			const askResult = await asker.tool("intercom").execute("ask-zero-wait", {
+				action: "ask",
+				to: "zero-wait-answerer",
+				message: "zero-wait-question",
+				waitForReadyMs: 0,
+			}, new AbortController().signal, undefined, asker.ctx);
+			assert.equal(askResult.isError, true);
+			assert.match(text(askResult), /not delivered|Session not found|may not exist|has disconnected/i);
+
+			answerer = await createHarness("zero-wait-answerer");
+			await answerer.start();
+			await wait(150);
+			assert.equal(answerer.sentMessages.some((entry) => entry.message.content?.includes("zero-wait-question")), false);
+		} finally {
+			if (answerer) await answerer.shutdown();
+			await asker.shutdown();
+		}
+	});
+});
+
+test("7.15/7.16 intercom reply re-resolves sender via piSessionId after sender reconnect", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const askerA = await createHarness("sticky-asker", { sessionIdPrefix: "sticky", stableSessionId: true });
+		const answerer = await createHarness("sticky-answerer");
+		let askerB: Awaited<ReturnType<typeof createHarness>> | null = null;
+		let askPromise: Promise<CapturedToolResult> | null = null;
+		try {
+			await askerA.start();
+			await answerer.start();
+			askPromise = askerA.tool("intercom").execute("ask-sticky", {
+				action: "ask",
+				to: "sticky-answerer",
+				message: "sticky-question",
+			}, new AbortController().signal, undefined, askerA.ctx);
+			await waitUntil(() => answerer.sentMessages.some((entry) => entry.message.content?.includes("sticky-question")), "answerer did not receive sticky ask");
+
+			await askerA.shutdown();
+
+			askerB = await createHarness("sticky-asker", { sessionIdPrefix: "sticky", stableSessionId: true });
+			await askerB.start();
+
+			const reply = await answerer.tool("intercom").execute("reply-sticky", {
+				action: "reply",
+				message: "sticky-reply",
+				waitForReadyMs: 2000,
+			}, new AbortController().signal, undefined, answerer.ctx);
+			assert.equal(reply.isError, false, text(reply));
+			await waitUntil(() => askerB!.sentMessages.some((entry) => entry.message.content?.includes("sticky-reply")), "reconnected asker did not receive reply");
+		} finally {
+			if (askPromise) await askPromise.catch(() => undefined);
+			if (askerB) await askerB.shutdown();
+			await answerer.shutdown();
+			await askerA.shutdown();
+		}
+	});
+});
+
+test("6.1/6.2 manual ask/reply/pending remains stable for protocol v2 sessions", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const asker = await createHarness("manual-asker");
+		const answerer = await createHarness("manual-answerer");
+		try {
+			await asker.start();
+			await answerer.start();
+
+			const askPromise = asker.tool("intercom").execute("ask", {
+				action: "ask",
+				to: "manual-answerer",
+				message: "manual-decision-needed",
+			}, new AbortController().signal, undefined, asker.ctx);
+
+			await waitUntil(() => answerer.sentMessages.some((entry) => entry.message.content?.includes("manual-decision-needed")), "answerer did not receive manual ask");
+
+			const pendingBeforeReply = await answerer.tool("intercom").execute("pending-before", { action: "pending" }, new AbortController().signal, undefined, answerer.ctx);
+			assert.match(text(pendingBeforeReply), /manual-decision-needed/);
+
+			const reply = await answerer.tool("intercom").execute("reply", {
+				action: "reply",
+				message: "manual-decision-confirmed",
+			}, new AbortController().signal, undefined, answerer.ctx);
+			assert.equal(reply.isError, false);
+
+			const askResult = await askPromise;
+			assert.equal(askResult.isError, false);
+			assert.match(text(askResult), /manual-decision-confirmed/);
+
+			const pendingAfterReply = await answerer.tool("intercom").execute("pending-after", { action: "pending" }, new AbortController().signal, undefined, answerer.ctx);
+			assert.match(text(pendingAfterReply), /No unresolved inbound asks/);
+		} finally {
+			await asker.shutdown();
+			await answerer.shutdown();
+		}
+	});
+});
+
+test("6.3/6.4 list/status keep protocol fields in details without cluttering text", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const alpha = await createHarness("list-alpha");
+		const beta = await createHarness("list-beta");
+		try {
+			await alpha.start();
+			await beta.start();
+
+			const list = await alpha.tool("intercom").execute("list", { action: "list" }, new AbortController().signal, undefined, alpha.ctx);
+			assert.equal(list.isError, false);
+			assert.doesNotMatch(text(list), /protocolVersion|capabilities|piSessionId-routing/);
+			const listDetails = list.details as { currentSession?: { protocolVersion?: number; capabilities?: string[]; piSessionId?: string }; otherSessions?: Array<{ protocolVersion?: number; capabilities?: string[]; piSessionId?: string }> } | undefined;
+			assert.equal(listDetails?.currentSession?.protocolVersion, 2);
+			assert.ok(Array.isArray(listDetails?.currentSession?.capabilities));
+			assert.ok(typeof listDetails?.currentSession?.piSessionId === "string" && listDetails.currentSession.piSessionId.length > 0);
+			assert.equal(listDetails?.otherSessions?.[0]?.protocolVersion, 2);
+			assert.ok(Array.isArray(listDetails?.otherSessions?.[0]?.capabilities));
+
+			const status = await alpha.tool("intercom").execute("status", { action: "status" }, new AbortController().signal, undefined, alpha.ctx);
+			assert.equal(status.isError, false);
+			assert.doesNotMatch(text(status), /protocolVersion|capabilities|piSessionId-routing/);
+			const statusDetails = status.details as { session?: { protocolVersion?: number; capabilities?: string[]; piSessionId?: string } } | undefined;
+			assert.equal(statusDetails?.session?.protocolVersion, 2);
+			assert.ok(Array.isArray(statusDetails?.session?.capabilities));
+			assert.ok(typeof statusDetails?.session?.piSessionId === "string" && statusDetails.session.piSessionId.length > 0);
+		} finally {
+			await alpha.shutdown();
+			await beta.shutdown();
+		}
+	});
+});
+
+test("6.5 manual intercom soft-degrades for legacy peers without protocol v2 capability", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const modern = await createHarness("manual-modern");
+		const legacy = await connectLegacyClient("manual-legacy");
+		const legacyReceived: string[] = [];
+		const onMessage = (_from: unknown, message: { content: { text: string } }) => legacyReceived.push(message.content.text);
+		legacy.on("message", onMessage);
+		try {
+			await modern.start();
+			const list = await modern.tool("intercom").execute("list", { action: "list" }, new AbortController().signal, undefined, modern.ctx);
+			assert.match(text(list), /manual-legacy/);
+
+			const sent = await modern.tool("intercom").execute("send", {
+				action: "send",
+				to: "manual-legacy",
+				message: "manual-soft-degrade-ok",
+			}, new AbortController().signal, undefined, modern.ctx);
+			assert.equal(sent.isError, false, text(sent));
+			await waitUntil(() => legacyReceived.some((value) => value.includes("manual-soft-degrade-ok")), "legacy peer did not receive manual message");
+		} finally {
+			legacy.off("message", onMessage);
+			await modern.shutdown();
+			await legacy.disconnect().catch(() => undefined);
+		}
+	});
+});
+
 test("7.9/7.10 intercom ask reply includes attachment formatting", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const asker = await createHarness("attachment-asker");
@@ -321,6 +541,10 @@ test("8.5/8.6 contact_supervisor progress_update sends non-blocking update to pa
 			await withChildEnv({
 				PI_SUBAGENT_CHILD: "1",
 				PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-supervisor",
+				PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: "parent-supervisor",
+				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: "parent-supervisor",
+				PI_SUBAGENT_SUPERVISOR_ALIAS: "parent-supervisor",
+				PI_SUBAGENT_SUPERVISOR_CWD: "/repo/parent",
 				PI_SUBAGENT_RUN_ID: "run-progress",
 				PI_SUBAGENT_CHILD_AGENT: "worker",
 				PI_SUBAGENT_CHILD_INDEX: "0",
@@ -346,29 +570,134 @@ test("8.5/8.6 contact_supervisor progress_update sends non-blocking update to pa
 	});
 });
 
-test("8.6b contact_supervisor refuses delivery when resolved supervisor cwd mismatches expected cwd", { concurrency: false }, async () => {
+test("4.7/4.8 contact_supervisor sends structured target envelope and routes by intercomSessionId", { concurrency: false }, async () => {
 	await withBroker(async () => {
-		const parent = await createHarness("parent-supervisor");
+		const parentA = await createHarness("duplicate-supervisor", { sessionIdPrefix: "parent-a" });
+		const parentB = await createHarness("duplicate-supervisor", { sessionIdPrefix: "parent-b" });
 		try {
-			await parent.start();
+			await parentA.start();
+			await parentB.start();
+			const parentAStatus = await parentA.tool("intercom").execute("status-a", { action: "status" }, new AbortController().signal, undefined, parentA.ctx);
+			const parentAIntercomSessionId = parseStatusSessionId(parentAStatus);
+			const parentAPiSessionId = "parent-a-session-0";
+
 			await withChildEnv({
 				PI_SUBAGENT_CHILD: "1",
-				PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-supervisor",
-				PI_SUBAGENT_ORCHESTRATOR_CWD: "/unexpected/cwd",
-				PI_SUBAGENT_RUN_ID: "run-progress",
+				PI_SUBAGENT_ORCHESTRATOR_TARGET: "duplicate-supervisor",
+				PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: parentAIntercomSessionId,
+				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: parentAPiSessionId,
+				PI_SUBAGENT_SUPERVISOR_ALIAS: "duplicate-supervisor",
+				PI_SUBAGENT_SUPERVISOR_CWD: "/repo/parent-a",
+				PI_SUBAGENT_RUN_ID: "run-structured",
 				PI_SUBAGENT_CHILD_AGENT: "worker",
 				PI_SUBAGENT_CHILD_INDEX: "0",
 			}, async () => {
-				const child = await createHarness("child-progress");
+				const child = await createHarness("child-structured", { sessionIdPrefix: "child-structured" });
+				try {
+					await child.start();
+					const decisionPromise = child.tool("contact_supervisor").execute("contact", {
+						reason: "need_decision",
+						message: "Route by intercom session id",
+					}, new AbortController().signal, undefined, child.ctx);
+					await waitUntil(() => parentA.sentMessages.some((entry) => entry.message.content?.includes("Route by intercom session id")), "parent A did not receive structured ask");
+					assert.equal(parentB.sentMessages.some((entry) => entry.message.content?.includes("Route by intercom session id")), false);
+					const reply = await parentA.tool("intercom").execute("reply", {
+						action: "reply",
+						message: "Routed to parent A",
+					}, new AbortController().signal, undefined, parentA.ctx);
+					assert.equal(reply.isError, false);
+					const decision = await decisionPromise;
+					assert.equal(decision.isError, false);
+					assert.match(text(decision), /Routed to parent A/);
+				} finally {
+					await child.shutdown();
+				}
+			});
+		} finally {
+			await parentA.shutdown();
+			await parentB.shutdown();
+		}
+	});
+});
+
+test("4.9/4.10 contact_supervisor falls back to piSessionId when supervisor intercomSessionId is stale", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const parent = await createHarness("fallback-parent", { sessionIdPrefix: "fallback-parent", stableSessionId: true });
+		try {
+			await parent.start();
+			const oldStatus = await parent.tool("intercom").execute("status-old", { action: "status" }, new AbortController().signal, undefined, parent.ctx);
+			const staleIntercomSessionId = parseStatusSessionId(oldStatus);
+			const stablePiSessionId = "fallback-parent-session-0";
+
+			await parent.shutdown();
+			await parent.start();
+			const newStatus = await parent.tool("intercom").execute("status-new", { action: "status" }, new AbortController().signal, undefined, parent.ctx);
+			const currentIntercomSessionId = parseStatusSessionId(newStatus);
+			assert.notEqual(currentIntercomSessionId, staleIntercomSessionId);
+
+			await withChildEnv({
+				PI_SUBAGENT_CHILD: "1",
+				PI_SUBAGENT_ORCHESTRATOR_TARGET: "fallback-parent",
+				PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: staleIntercomSessionId,
+				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: stablePiSessionId,
+				PI_SUBAGENT_SUPERVISOR_ALIAS: "fallback-parent",
+				PI_SUBAGENT_SUPERVISOR_CWD: "/repo/fallback-parent",
+				PI_SUBAGENT_RUN_ID: "run-fallback",
+				PI_SUBAGENT_CHILD_AGENT: "worker",
+				PI_SUBAGENT_CHILD_INDEX: "0",
+			}, async () => {
+				const child = await createHarness("child-fallback", { sessionIdPrefix: "child-fallback" });
 				try {
 					await child.start();
 					const result = await child.tool("contact_supervisor").execute("contact", {
 						reason: "progress_update",
-						message: "UPDATE: should not send",
+						message: "UPDATE: stale-id fallback",
 					}, new AbortController().signal, undefined, child.ctx);
-					assert.equal(result.isError, true);
-					assert.match(text(result), /cwd mismatch/i);
-					assert.equal(parent.sentMessages.some((entry) => entry.message.content?.includes("UPDATE: should not send")), false);
+					assert.equal(result.isError, false, text(result));
+					await waitUntil(() => parent.sentMessages.some((entry) => entry.message.content?.includes("UPDATE: stale-id fallback")), "parent did not receive stale-id fallback update");
+				} finally {
+					await child.shutdown();
+				}
+			});
+		} finally {
+			await parent.shutdown();
+		}
+	});
+});
+
+test("4.11/4.12 contact_supervisor legacy env uses alias-only routing and still delivers", { concurrency: false }, async () => {
+	await withBroker(async () => {
+		const parent = await createHarness("legacy-parent");
+		try {
+			await parent.start();
+			await withChildEnv({
+				PI_SUBAGENT_CHILD: "1",
+				PI_SUBAGENT_ORCHESTRATOR_TARGET: "legacy-parent",
+				PI_SUBAGENT_ORCHESTRATOR_CWD: "/repo/legacy-parent",
+				PI_SUBAGENT_RUN_ID: "run-legacy-only",
+				PI_SUBAGENT_CHILD_AGENT: "worker",
+				PI_SUBAGENT_CHILD_INDEX: "0",
+			}, async () => {
+				const child = await createHarness("legacy-child", { sessionIdPrefix: "legacy-child" });
+				try {
+					await child.start();
+					assert.ok(child.runner.getToolDefinition("contact_supervisor"), "runner should register child supervisor tool for legacy env");
+					const result = await child.tool("contact_supervisor").execute("contact", {
+						reason: "progress_update",
+						message: "UPDATE: legacy-alias-only",
+					}, new AbortController().signal, undefined, child.ctx);
+					assert.equal(result.isError, false, text(result));
+					await waitUntil(() => parent.sentMessages.some((entry) => entry.message.content?.includes("UPDATE: legacy-alias-only")), "parent did not receive legacy alias update");
+					const sentEntry = child.entries.find((entry) => {
+						if (entry.type !== "intercom_sent") return false;
+						const data = entry.data as { message?: { text?: string } };
+						return data.message?.text === "UPDATE: legacy-alias-only";
+					});
+					assert.ok(sentEntry, "legacy send should append intercom_sent entry");
+					const sentData = sentEntry!.data as { target?: Record<string, unknown> };
+					assert.deepEqual(sentData.target, { alias: "legacy-parent" });
+					assert.equal(Object.prototype.hasOwnProperty.call(sentData.target ?? {}, "intercomSessionId"), false);
+					assert.equal(Object.prototype.hasOwnProperty.call(sentData.target ?? {}, "piSessionId"), false);
 				} finally {
 					await child.shutdown();
 				}
@@ -387,6 +716,10 @@ test("8.7/8.8 contact_supervisor need_decision waits for parent reply", { concur
 			await withChildEnv({
 				PI_SUBAGENT_CHILD: "1",
 				PI_SUBAGENT_ORCHESTRATOR_TARGET: "decision-parent",
+				PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: "decision-parent",
+				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: "decision-parent",
+				PI_SUBAGENT_SUPERVISOR_ALIAS: "decision-parent",
+				PI_SUBAGENT_SUPERVISOR_CWD: "/repo/decision",
 				PI_SUBAGENT_RUN_ID: "run-decision",
 				PI_SUBAGENT_CHILD_AGENT: "worker",
 				PI_SUBAGENT_CHILD_INDEX: "1",
@@ -426,6 +759,10 @@ test("8.9/8.10 contact_supervisor interview_request returns structured responses
 			await withChildEnv({
 				PI_SUBAGENT_CHILD: "1",
 				PI_SUBAGENT_ORCHESTRATOR_TARGET: "interview-parent",
+				PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: "interview-parent",
+				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: "interview-parent",
+				PI_SUBAGENT_SUPERVISOR_ALIAS: "interview-parent",
+				PI_SUBAGENT_SUPERVISOR_CWD: "/repo/interview",
 				PI_SUBAGENT_RUN_ID: "run-interview",
 				PI_SUBAGENT_CHILD_AGENT: "planner",
 				PI_SUBAGENT_CHILD_INDEX: "2",

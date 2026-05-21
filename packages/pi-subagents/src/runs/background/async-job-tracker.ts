@@ -7,6 +7,7 @@ import {
 	type AsyncJobState,
 	type AsyncStartedEvent,
 	type ControlEvent,
+	type IntercomRelayTarget,
 	type SubagentState,
 	POLL_INTERVAL_MS,
 	RESULTS_DIR,
@@ -28,6 +29,22 @@ interface AsyncJobTrackerOptions {
 export function isAsyncControlEventActionable(job: Pick<AsyncJobState, "status">, event: ControlEvent): boolean {
 	if (event.reason === "completion_guard") return true;
 	return job.status !== "complete" && job.status !== "failed";
+}
+
+function normalizeRelayTarget(target: unknown): IntercomRelayTarget | undefined {
+	if (!target || typeof target !== "object") return undefined;
+	const value = target as { intercomSessionId?: unknown; piSessionId?: unknown; alias?: unknown; namespace?: unknown };
+	const intercomSessionId = typeof value.intercomSessionId === "string" ? value.intercomSessionId.trim() : "";
+	const piSessionId = typeof value.piSessionId === "string" ? value.piSessionId.trim() : "";
+	const alias = typeof value.alias === "string" ? value.alias.trim() : "";
+	const namespace = typeof value.namespace === "string" ? value.namespace.trim() : "";
+	if (!intercomSessionId && !piSessionId && !alias) return undefined;
+	return {
+		...(intercomSessionId ? { intercomSessionId } : {}),
+		...(piSessionId ? { piSessionId } : {}),
+		...(alias ? { alias } : {}),
+		...(namespace ? { namespace } : {}),
+	};
 }
 
 export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: SubagentState, asyncDirRoot: string, options: AsyncJobTrackerOptions = {}): {
@@ -84,7 +101,18 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 					continue;
 				}
 				if (!parsed || typeof parsed !== "object" || (parsed as { type?: unknown }).type !== "subagent.control") continue;
-				const record = parsed as { event?: ControlEvent; channels?: string[]; childIntercomTarget?: string; noticeText?: string; intercom?: { to?: string; message?: string } };
+				const record = parsed as {
+					event?: ControlEvent;
+					channels?: string[];
+					childIntercomTarget?: string;
+					noticeText?: string;
+					intercom?: {
+						to?: string;
+						target?: IntercomRelayTarget;
+						ownerPiSessionId?: string;
+						message?: string;
+					};
+				};
 				if (!record.event || !Array.isArray(record.channels)) continue;
 				if (!isAsyncControlEventActionable(job, record.event)) continue;
 				const payload = {
@@ -97,9 +125,14 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 				if (record.channels.includes("event")) {
 					pi.events.emit(SUBAGENT_CONTROL_EVENT, payload);
 				}
-				if (record.event.type !== "active_long_running" && record.channels.includes("intercom") && record.intercom?.to && record.intercom.message) {
+				const relayTarget = normalizeRelayTarget(record.intercom?.target)
+					?? (record.intercom?.to ? { alias: record.intercom.to } : undefined);
+				const ownerPiSessionId = record.intercom?.ownerPiSessionId?.trim() || job.sessionId;
+				if (record.event.type !== "active_long_running" && record.channels.includes("intercom") && relayTarget && ownerPiSessionId && record.intercom?.message) {
 					pi.events.emit(SUBAGENT_CONTROL_INTERCOM_EVENT, {
 						...payload,
+						ownerPiSessionId,
+						target: relayTarget,
 						to: record.intercom.to,
 						message: record.intercom.message,
 					});

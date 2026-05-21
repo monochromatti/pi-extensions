@@ -4,6 +4,7 @@ import { buildCompletionKey, markSeenWithTtl } from "./completion-dedupe.ts";
 import { createFileCoalescer } from "../../shared/file-coalescer.ts";
 import {
 	SUBAGENT_ASYNC_COMPLETE_EVENT,
+	type IntercomRelayTarget,
 	type IntercomEventBus,
 	type SubagentState,
 } from "../../shared/types.ts";
@@ -43,6 +44,27 @@ function isNotFoundError(error: unknown): boolean {
 function shouldFallBackToPolling(error: unknown): boolean {
 	const code = getErrorCode(error);
 	return code === "EMFILE" || code === "ENOSPC";
+}
+
+function normalizeRelayTarget(target: unknown): IntercomRelayTarget | undefined {
+	if (!target || typeof target !== "object") return undefined;
+	const candidate = target as {
+		intercomSessionId?: unknown;
+		piSessionId?: unknown;
+		alias?: unknown;
+		namespace?: unknown;
+	};
+	const intercomSessionId = typeof candidate.intercomSessionId === "string" ? candidate.intercomSessionId.trim() : "";
+	const piSessionId = typeof candidate.piSessionId === "string" ? candidate.piSessionId.trim() : "";
+	const alias = typeof candidate.alias === "string" ? candidate.alias.trim() : "";
+	const namespace = typeof candidate.namespace === "string" ? candidate.namespace.trim() : "";
+	if (!intercomSessionId && !piSessionId && !alias) return undefined;
+	return {
+		...(intercomSessionId ? { intercomSessionId } : {}),
+		...(piSessionId ? { piSessionId } : {}),
+		...(alias ? { alias } : {}),
+		...(namespace ? { namespace } : {}),
+	};
 }
 
 export function createResultWatcher(
@@ -85,6 +107,8 @@ export function createResultWatcher(
 				sessionFile?: string;
 				asyncDir?: string;
 				intercomTarget?: string;
+				intercomTargetDescriptor?: IntercomRelayTarget;
+				ownerPiSessionId?: string;
 			};
 			if (data.sessionId && data.sessionId !== state.currentSessionId) return;
 			if (!data.sessionId && data.cwd && data.cwd !== state.baseCwd) return;
@@ -97,7 +121,10 @@ export function createResultWatcher(
 			}
 
 			const intercomTarget = data.intercomTarget?.trim();
-			if (intercomTarget) {
+			const ownerPiSessionId = data.ownerPiSessionId?.trim() || data.sessionId?.trim();
+			const target = normalizeRelayTarget(data.intercomTargetDescriptor)
+				?? (intercomTarget ? { alias: intercomTarget } : undefined);
+			if (ownerPiSessionId && target) {
 				const childResults = Array.isArray(data.results) && data.results.length > 0
 					? data.results
 					: [{
@@ -110,6 +137,8 @@ export function createResultWatcher(
 					? data.mode
 					: childResults.length > 1 ? "chain" : "single";
 				const payload = buildSubagentResultIntercomPayload({
+					ownerPiSessionId,
+					target,
 					to: intercomTarget,
 					runId,
 					mode,
