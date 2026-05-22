@@ -73,6 +73,24 @@ interface ResolveIntercomBridgeInput {
 	globalNpmRoot?: string | null;
 }
 
+interface IntercomBridgeResolvedContext {
+	config: Required<IntercomBridgeConfig>;
+	mode: IntercomBridgeMode;
+	extensionDir: string;
+	configPath: string;
+	settingsDir: string;
+	orchestratorTarget?: string;
+	defaultInstruction: string;
+}
+
+interface IntercomBridgeEligibility {
+	active: boolean;
+	reason?: string;
+	wantsIntercom: boolean;
+	piIntercomAvailable: boolean;
+	configStatus?: ReturnType<typeof intercomConfigStatus>;
+}
+
 export function resolveIntercomSessionTarget(sessionName: string | undefined, sessionId: string): string {
 	const trimmedName = sessionName?.trim();
 	if (trimmedName) return trimmedName;
@@ -272,25 +290,60 @@ function buildIntercomBridgeInstruction(orchestratorTarget: string, template: st
 ${instruction}`;
 }
 
-export function diagnoseIntercomBridge(input: ResolveIntercomBridgeInput): IntercomBridgeDiagnostic {
+function resolveIntercomBridgeContext(input: ResolveIntercomBridgeInput): IntercomBridgeResolvedContext {
 	const config = resolveIntercomBridgeConfig(input.config);
 	const mode = config.mode;
 	const agentDir = path.resolve(input.agentDir ?? defaultAgentDir());
 	const extensionDir = resolveIntercomExtensionDir(input, agentDir);
-	const orchestratorTarget = input.orchestratorTarget?.trim();
 	const configPath = path.resolve(input.configPath ?? defaultIntercomConfigPath(agentDir));
-	const wantsIntercom = mode !== "off" && !(mode === "fork-only" && input.context !== "fork");
-	const piIntercomAvailable = fs.existsSync(extensionDir);
-	let configStatus: ReturnType<typeof intercomConfigStatus> | undefined;
+	const settingsDir = path.resolve(input.settingsDir ?? defaultSubagentConfigDir(agentDir));
+	const orchestratorTarget = input.orchestratorTarget?.trim();
+	const defaultInstruction = buildIntercomBridgeInstruction(
+		orchestratorTarget || "{orchestratorTarget}",
+		DEFAULT_INTERCOM_BRIDGE_TEMPLATE,
+	);
+	return {
+		config,
+		mode,
+		extensionDir,
+		configPath,
+		settingsDir,
+		orchestratorTarget,
+		defaultInstruction,
+	};
+}
+
+function evaluateIntercomBridgeEligibility(
+	resolved: IntercomBridgeResolvedContext,
+	context: ResolveIntercomBridgeInput["context"],
+): IntercomBridgeEligibility {
+	const wantsIntercom = resolved.mode !== "off" && !(resolved.mode === "fork-only" && context !== "fork");
+	const piIntercomAvailable = fs.existsSync(resolved.extensionDir);
+
 	let reason: string | undefined;
-	if (mode === "off") reason = "bridge mode is off";
-	else if (mode === "fork-only" && input.context !== "fork") reason = "bridge mode is fork-only and context is not fork";
-	else if (!orchestratorTarget) reason = "orchestrator target is not available";
+	let configStatus: ReturnType<typeof intercomConfigStatus> | undefined;
+	if (resolved.mode === "off") reason = "bridge mode is off";
+	else if (resolved.mode === "fork-only" && context !== "fork") reason = "bridge mode is fork-only and context is not fork";
+	else if (!resolved.orchestratorTarget) reason = "orchestrator target is not available";
 	else if (!piIntercomAvailable) reason = "pi-intercom extension was not found";
 	else {
-		configStatus = intercomConfigStatus(configPath);
+		configStatus = intercomConfigStatus(resolved.configPath);
 		if (!configStatus.enabled) reason = "intercom config is disabled";
 	}
+
+	return {
+		active: reason === undefined,
+		reason,
+		wantsIntercom,
+		piIntercomAvailable,
+		configStatus,
+	};
+}
+
+export function diagnoseIntercomBridge(input: ResolveIntercomBridgeInput): IntercomBridgeDiagnostic {
+	const resolved = resolveIntercomBridgeContext(input);
+	const eligibility = evaluateIntercomBridgeEligibility(resolved, input.context);
+	const configStatus = eligibility.configStatus;
 	let intercomConfigError: string | undefined;
 	if (configStatus?.error) {
 		const error = configStatus.error;
@@ -298,63 +351,47 @@ export function diagnoseIntercomBridge(input: ResolveIntercomBridgeInput): Inter
 	}
 
 	return {
-		active: reason === undefined,
-		mode,
-		wantsIntercom,
-		piIntercomAvailable,
-		extensionDir,
-		configPath,
-		...(orchestratorTarget ? { orchestratorTarget } : {}),
+		active: eligibility.active,
+		mode: resolved.mode,
+		wantsIntercom: eligibility.wantsIntercom,
+		piIntercomAvailable: eligibility.piIntercomAvailable,
+		extensionDir: resolved.extensionDir,
+		configPath: resolved.configPath,
+		...(resolved.orchestratorTarget ? { orchestratorTarget: resolved.orchestratorTarget } : {}),
 		...(input.supervisorTarget ? { supervisorTarget: input.supervisorTarget } : {}),
-		...(reason ? { reason } : {}),
+		...(eligibility.reason ? { reason: eligibility.reason } : {}),
 		...(configStatus ? { intercomConfigEnabled: configStatus.enabled } : {}),
 		...(intercomConfigError ? { intercomConfigError } : {}),
 	};
 }
 
 export function resolveIntercomBridge(input: ResolveIntercomBridgeInput): IntercomBridgeState {
-	const config = resolveIntercomBridgeConfig(input.config);
-	const mode = config.mode;
-	const agentDir = path.resolve(input.agentDir ?? defaultAgentDir());
-	const extensionDir = resolveIntercomExtensionDir(input, agentDir);
-	const orchestratorTarget = input.orchestratorTarget?.trim();
-	const settingsDir = path.resolve(input.settingsDir ?? defaultSubagentConfigDir(agentDir));
-	const defaultInstruction = buildIntercomBridgeInstruction(
-		orchestratorTarget || "{orchestratorTarget}",
-		DEFAULT_INTERCOM_BRIDGE_TEMPLATE,
-	);
-
-	if (mode === "off") {
-		return { active: false, mode, extensionDir, instruction: defaultInstruction };
-	}
-	if (mode === "fork-only" && input.context !== "fork") {
-		return { active: false, mode, extensionDir, instruction: defaultInstruction };
-	}
-	if (!orchestratorTarget) {
-		return { active: false, mode, extensionDir, instruction: defaultInstruction };
-	}
-	if (!fs.existsSync(extensionDir)) {
-		return { active: false, mode, extensionDir, instruction: defaultInstruction };
+	const resolved = resolveIntercomBridgeContext(input);
+	const eligibility = evaluateIntercomBridgeEligibility(resolved, input.context);
+	if (!eligibility.active || !resolved.orchestratorTarget) {
+		return {
+			active: false,
+			mode: resolved.mode,
+			extensionDir: resolved.extensionDir,
+			instruction: resolved.defaultInstruction,
+		};
 	}
 
-	const configPath = path.resolve(input.configPath ?? defaultIntercomConfigPath(agentDir));
-	const intercomStatus = intercomConfigStatus(configPath);
-	if (intercomStatus.error) console.warn(`Failed to parse intercom config at '${configPath}'. Assuming enabled.`, intercomStatus.error);
-	if (!intercomStatus.enabled) {
-		return { active: false, mode, extensionDir, instruction: defaultInstruction };
+	if (eligibility.configStatus?.error) {
+		console.warn(`Failed to parse intercom config at '${resolved.configPath}'. Assuming enabled.`, eligibility.configStatus.error);
 	}
 
 	const instruction = buildIntercomBridgeInstruction(
-		orchestratorTarget,
-		resolveInstructionTemplate(config.instructionFile, settingsDir),
+		resolved.orchestratorTarget,
+		resolveInstructionTemplate(resolved.config.instructionFile, resolved.settingsDir),
 	);
 
 	return {
 		active: true,
-		mode,
-		orchestratorTarget,
+		mode: resolved.mode,
+		orchestratorTarget: resolved.orchestratorTarget,
 		...(input.supervisorTarget ? { supervisorTarget: input.supervisorTarget } : {}),
-		extensionDir,
+		extensionDir: resolved.extensionDir,
 		instruction,
 	};
 }
