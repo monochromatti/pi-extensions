@@ -22,7 +22,7 @@ test("getWindowsHiddenLauncherPath points at the broker launcher script", () => 
   assert.equal(launcherPath, path.join("C:/tmp/intercom", "broker-launch.vbs"));
 });
 
-test("getWindowsBrokerCommandLine wraps node, tsx cli, and broker path", () => {
+test("getWindowsBrokerCommandLine wraps node, transform-types flag, and broker path", () => {
   const commandLine = getWindowsBrokerCommandLine(
     "C:/repo/broker.ts",
     "C:/repo",
@@ -30,7 +30,7 @@ test("getWindowsBrokerCommandLine wraps node, tsx cli, and broker path", () => {
   );
   assert.equal(
     commandLine,
-    `"C:/Program Files/nodejs/node.exe" "${path.join("C:/repo", "node_modules", "tsx", "dist", "cli.mjs")}" "C:/repo/broker.ts"`,
+    `"C:/Program Files/nodejs/node.exe" "--experimental-transform-types" "C:/repo/broker.ts"`,
   );
 });
 

@@ -42,22 +42,30 @@ export function getWindowsHiddenLauncherPath(intercomDir: string = INTERCOM_DIR)
   return join(intercomDir, "broker-launch.vbs");
 }
 
-function usesDefaultBrokerCommand(brokerCommand: string, brokerArgs: string[]): boolean {
+function usesLegacyNpxBrokerCommand(brokerCommand: string, brokerArgs: string[]): boolean {
   return brokerCommand === "npx"
     && brokerArgs.length === 2
     && brokerArgs[0] === "--no-install"
     && brokerArgs[1] === "tsx";
 }
 
+function usesNodeBrokerCommand(brokerCommand: string): boolean {
+  return brokerCommand === "node";
+}
+
 export function getWindowsBrokerCommandLine(
   brokerPath: string,
   extensionDir: string = EXTENSION_DIR,
   nodePath: string = process.execPath,
-  brokerCommand = "npx",
-  brokerArgs: string[] = ["--no-install", "tsx"],
+  brokerCommand = "node",
+  brokerArgs: string[] = ["--experimental-transform-types"],
 ): string {
-  if (usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
+  if (usesLegacyNpxBrokerCommand(brokerCommand, brokerArgs)) {
     return [quoteWindowsArg(nodePath), quoteWindowsArg(getTsxCliPath(extensionDir)), quoteWindowsArg(brokerPath)].join(" ");
+  }
+
+  if (usesNodeBrokerCommand(brokerCommand)) {
+    return [quoteWindowsArg(nodePath), ...brokerArgs.map(quoteWindowsArg), quoteWindowsArg(brokerPath)].join(" ");
   }
 
   return [quoteWindowsArg(brokerCommand), ...brokerArgs.map(quoteWindowsArg), quoteWindowsArg(brokerPath)].join(" ");

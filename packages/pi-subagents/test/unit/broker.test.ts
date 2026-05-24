@@ -51,7 +51,7 @@ test("7.1 broker spawn helpers build hidden Windows launcher specs without writi
 		assert.equal(getWindowsHiddenLauncherPath(intercomDir), path.join(intercomDir, "broker-launch.vbs"));
 		assert.equal(
 			getWindowsBrokerCommandLine("C:/repo/broker.ts", "C:/repo", "C:/Program Files/nodejs/node.exe"),
-			`"C:/Program Files/nodejs/node.exe" "${path.join("C:/repo", "node_modules", "tsx", "dist", "cli.mjs")}" "C:/repo/broker.ts"`,
+			`"C:/Program Files/nodejs/node.exe" "--experimental-transform-types" "C:/repo/broker.ts"`,
 		);
 		assert.match(getWindowsHiddenLauncherScript('"node" "broker.ts"'), /WshShell\.Run/);
 		assert.match(getWindowsHiddenLauncherScript('"node" "broker.ts"'), /, 0, False/);

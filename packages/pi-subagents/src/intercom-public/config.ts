@@ -3,7 +3,7 @@ import { join } from "path";
 import { homedir } from "os";
 
 export interface IntercomConfig {
-  /** Broker command used to spawn the broker process (e.g. "npx" or "bun") */
+  /** Broker command used to spawn the broker process (e.g. "node" or "bun") */
   brokerCommand: string;
 
   /** Arguments passed to the broker command before the broker script path */
@@ -25,8 +25,8 @@ export interface IntercomConfig {
 const CONFIG_PATH = join(homedir(), ".pi/agent/intercom/config.json");
 
 const defaults: IntercomConfig = {
-  brokerCommand: "npx",
-  brokerArgs: ["--no-install", "tsx"],
+  brokerCommand: "node",
+  brokerArgs: ["--experimental-transform-types"],
   confirmSend: false,
   enabled: true,
   replyHint: true,
