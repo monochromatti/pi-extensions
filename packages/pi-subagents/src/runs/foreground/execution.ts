@@ -366,6 +366,9 @@ async function runSingleAttempt(
 				now,
 			});
 			if (idleState === "needs_attention") {
+				if (!progress.currentTool) {
+					return emitActiveLongRunning(now, "idle");
+				}
 				return progress.activityState === "needs_attention" ? false : emitNeedsAttention(now);
 			}
 			const activeReason = nextLongRunningTrigger(controlConfig, {
@@ -628,6 +631,12 @@ async function runSingleAttempt(
 		result.exitCode = 0;
 		result.finalOutput = "Detached for intercom coordination.";
 		return result;
+	}
+
+	const preClassifyOutput = getFinalOutput(result.messages);
+	if (result.error === "terminated" && cleanTerminalAssistantStopReceived && preClassifyOutput.trim()) {
+		result.error = undefined;
+		result.exitCode = 0;
 	}
 
 	const classified = classifyChildRunResult({

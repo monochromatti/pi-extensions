@@ -155,6 +155,33 @@ function foregroundStatusResult(control: SubagentState["foregroundControls"] ext
 	return { content: [{ type: "text", text: lines.join("\n") }], details: { mode: "management", results: [] } };
 }
 
+function completedForegroundStatusResult(run: NonNullable<SubagentState["foregroundRuns"]> extends Map<string, infer T> ? T : never): AgentToolResult<Details> {
+	const lines = [
+		`Run: ${run.runId}`,
+		"State: complete",
+		`Mode: ${run.mode}`,
+		`Updated: ${new Date(run.updatedAt).toISOString()}`,
+		...run.children.flatMap((child) => [
+			`Child ${child.index + 1}: ${child.agent} ${child.status}`,
+			child.error ? `Error: ${child.error}` : undefined,
+			child.finalOutput ? `Output: ${child.finalOutput.split("\n").slice(0, 8).join("\n")}` : undefined,
+			child.artifactPath ? `Artifact: ${child.artifactPath}` : undefined,
+			child.sessionFile ? `Session: ${child.sessionFile}` : undefined,
+		].filter((line): line is string => Boolean(line))),
+	];
+	return { content: [{ type: "text", text: lines.join("\n") }], details: { mode: "management", results: [] } };
+}
+
+function getCompletedForegroundRun(state: SubagentState, runId: string | undefined) {
+	const requested = runId?.trim();
+	if (!requested || !state.foregroundRuns?.size) return undefined;
+	const direct = state.foregroundRuns.get(requested);
+	if (direct) return direct;
+	const matches = [...state.foregroundRuns.values()].filter((run) => run.runId.startsWith(requested));
+	if (matches.length === 1) return matches[0];
+	return undefined;
+}
+
 function rememberForegroundRun(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; results: SingleResult[] }): void {
 	state.foregroundRuns ??= new Map();
 	state.foregroundRuns.set(input.runId, {
@@ -167,6 +194,9 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 			index,
 			status: resolveSubagentResultStatus({ exitCode: result.exitCode, interrupted: result.interrupted, detached: result.detached }),
 			...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
+			...(result.artifactPaths?.outputPath ? { artifactPath: result.artifactPaths.outputPath } : {}),
+			...(result.finalOutput ? { finalOutput: result.finalOutput } : {}),
+			...(result.error ? { error: result.error } : {}),
 		})),
 	});
 	while (state.foregroundRuns.size > 50) {
@@ -300,7 +330,7 @@ function emitControlNotification(input: {
 	if (input.controlConfig.notifyChannels.includes("event")) {
 		input.pi.events.emit(SUBAGENT_CONTROL_EVENT, payload);
 	}
-	if (input.event.type !== "active_long_running" && input.controlConfig.notifyChannels.includes("intercom") && input.intercomBridge.active && input.intercomBridge.orchestratorTarget && controlTarget) {
+	if (input.controlConfig.notifyChannels.includes("intercom") && input.intercomBridge.active && input.intercomBridge.orchestratorTarget && controlTarget) {
 		input.pi.events.emit(SUBAGENT_CONTROL_INTERCOM_EVENT, {
 			...payload,
 			ownerPiSessionId: input.ownerPiSessionId,
@@ -1566,6 +1596,8 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		if (surfaceRequest.kind === "status") {
 			const foreground = getForegroundControl(deps.state, surfaceRequest.id ?? surfaceRequest.runId);
 			if (foreground) return foregroundStatusResult(foreground);
+			const completedForeground = getCompletedForegroundRun(deps.state, surfaceRequest.id ?? surfaceRequest.runId);
+			if (completedForeground) return completedForegroundStatusResult(completedForeground);
 			return inspectSubagentStatus(surfaceRequest.params);
 		}
 		if (surfaceRequest.kind === "resume") {

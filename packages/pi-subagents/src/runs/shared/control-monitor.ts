@@ -124,6 +124,28 @@ export function createControlMonitor(input: CreateControlMonitorInput): ControlM
 				now: tickInput.now,
 			});
 			if (idleState === "needs_attention") {
+				if (!tickInput.currentTool) {
+					if (activityState === "needs_attention" || activeLongRunningNotified) return undefined;
+					activeLongRunningNotified = true;
+					const previous = activityState;
+					activityState = "active_long_running";
+					return maybeEmit(buildControlEvent({
+						type: "active_long_running",
+						from: previous,
+						to: "active_long_running",
+						runId: input.runId,
+						agent: input.agent,
+						index: input.index,
+						ts: tickInput.now,
+						lastActivityAt,
+						message: `${input.agent} has had no model output for a while`,
+						reason: "idle",
+						turns: tickInput.turns,
+						tokens: tickInput.tokens,
+						toolCount: tickInput.toolCount,
+						elapsedMs: tickInput.now - lastActivityAt,
+					}));
+				}
 				return buildNeedsAttentionEvent({
 					now: tickInput.now,
 					turns: tickInput.turns,

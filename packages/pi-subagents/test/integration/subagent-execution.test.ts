@@ -363,7 +363,7 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 					task: "Investigate long running operation",
 					control: {
 						needsAttentionAfterMs: 1,
-						notifyOn: ["needs_attention"],
+						notifyOn: ["active_long_running"],
 						notifyChannels: ["intercom"],
 					},
 				},

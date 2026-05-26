@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createControlMonitor } from "../../src/runs/shared/control-monitor.ts";
 
-test("4.1/4.2 no event before idle threshold, one needs_attention after threshold", () => {
+test("4.1/4.2 no event before idle threshold, pure quiet becomes active_long_running after threshold", () => {
 	const monitor = createControlMonitor({
 		config: {
 			enabled: true,
@@ -21,11 +21,11 @@ test("4.1/4.2 no event before idle threshold, one needs_attention after threshol
 	assert.equal(before, undefined);
 
 	const after = monitor.tick({ now: 2_100, turns: 0, tokens: 0, toolCount: 0 });
-	assert.equal(after?.type, "needs_attention");
+	assert.equal(after?.type, "active_long_running");
 	assert.equal(after?.reason, "idle");
 });
 
-test("4.3/4.4 duplicate needs_attention ticks deduped", () => {
+test("4.3/4.4 duplicate pure quiet active_long_running ticks deduped", () => {
 	const monitor = createControlMonitor({
 		config: {
 			enabled: true,
@@ -41,7 +41,7 @@ test("4.3/4.4 duplicate needs_attention ticks deduped", () => {
 	});
 
 	const first = monitor.tick({ now: 1_100, turns: 0, tokens: 0, toolCount: 0 });
-	assert.equal(first?.type, "needs_attention");
+	assert.equal(first?.type, "active_long_running");
 
 	const second = monitor.tick({ now: 1_200, turns: 0, tokens: 0, toolCount: 0 });
 	assert.equal(second, undefined);

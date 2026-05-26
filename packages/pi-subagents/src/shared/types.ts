@@ -363,6 +363,9 @@ export interface ForegroundResumeChild {
 	agent: string;
 	index: number;
 	sessionFile?: string;
+	artifactPath?: string;
+	finalOutput?: string;
+	error?: string;
 	status: SubagentResultStatus;
 }
 
