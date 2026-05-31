@@ -13,6 +13,7 @@ function agent(name: string, overrides: Partial<AgentConfig> = {}): AgentConfig 
 		inheritSkills: false,
 		source: "project",
 		filePath: `/agents/${name}.md`,
+		mutationGuardPolicy: "auto",
 		...overrides,
 	} as AgentConfig;
 }

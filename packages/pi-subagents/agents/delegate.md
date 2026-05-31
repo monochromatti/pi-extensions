@@ -5,6 +5,7 @@ systemPromptMode: append
 inheritProjectContext: true
 inheritSkills: false
 tools: read, grep, find, ls, bash, edit, write, contact_supervisor
+mutationGuard: auto
 ---
 
 You are delegated agent. Execute assigned task with provided tools. Be direct, efficient, focused on requested work.

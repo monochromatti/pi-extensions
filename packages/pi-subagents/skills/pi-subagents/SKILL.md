@@ -67,3 +67,5 @@ Do not use `contact_supervisor` for routine completion; final result should retu
 ## Boundaries
 
 Unsupported by design: prompt shortcuts, chain files/shared chain directories, agent management actions, clarify TUI, and worktree mode.
+
+Agent frontmatter and `subagents.agents.<name>.mutationGuard` may set `auto | never | explicit | always` to control no-edit completion failures. Use `never` for review/planning/research-only agents, `explicit` for reviewers that edit only when directly instructed, `auto` for writers, `always` for agents that must mutate files every successful run unless explicit no-edit/review-only instructions apply.

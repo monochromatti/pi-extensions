@@ -302,6 +302,7 @@ export function executeAsyncChain(
 		return {
 			agent: s.agent,
 			task,
+			mutationGuardPolicy: a.mutationGuardPolicy,
 			cwd: stepCwd,
 			model: applyThinkingSuffix(primaryModel, behavior.thinking),
 			modelCandidates: buildModelCandidates(behavior.model ?? a.model, a.fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
@@ -518,6 +519,7 @@ export function executeAsyncSingle(
 					{
 						agent,
 						task: taskWithOutputInstruction,
+						mutationGuardPolicy: agentConfig.mutationGuardPolicy,
 						cwd: runnerCwd,
 						model: applyThinkingSuffix(resolveModelCandidate(params.modelOverride ?? agentConfig.model, availableModels, ctx.currentModelProvider), params.thinkingOverride ?? agentConfig.thinking),
 						modelCandidates: buildModelCandidates(params.modelOverride ?? agentConfig.model, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>

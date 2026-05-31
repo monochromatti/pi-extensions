@@ -32,6 +32,7 @@ function agent(name: string, defaultContext?: "fresh" | "fork"): AgentConfig {
     name,
     description: `${name} agent`,
     systemPrompt: "test",
+    mutationGuardPolicy: "auto",
     ...(defaultContext ? { defaultContext } : {}),
   } as AgentConfig;
 }

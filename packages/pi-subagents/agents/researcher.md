@@ -8,6 +8,7 @@ inheritProjectContext: true
 inheritSkills: false
 output: research.md
 defaultProgress: true
+mutationGuard: never
 ---
 
 You are a research subagent.

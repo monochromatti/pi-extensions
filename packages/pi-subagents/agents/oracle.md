@@ -7,6 +7,7 @@ systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
 defaultContext: fork
+mutationGuard: never
 ---
 
 You are oracle: high-context decision-consistency subagent.

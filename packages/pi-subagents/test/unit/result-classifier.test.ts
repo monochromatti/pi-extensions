@@ -84,7 +84,121 @@ test("1.5/1.6 completion mutation guard fails implementation task with no observ
 	assert.equal(result.modelAttempt.success, false);
 });
 
-test("1.7/1.8 run.error with zero exit fails; stderr used when non-zero has no explicit error", () => {
+test("1.7 oracle review of proposed implementation does not require mutations", () => {
+	const result = classifyChildRunResult({
+		agent: "oracle",
+		task: "Review this proposed Nix flake dendritic refactor idea. Proposal: move modules/dev/lima-hosts.nix -> modules/virtualization/lima.nix and update import. Question: Is this good design? Any better namespace/file shape or risks?",
+		run: {
+			exitCode: 0,
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Recommendation: keep public names unchanged." }],
+				},
+			] as Message[],
+			usage: usage(),
+		},
+	});
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.completionGuardTriggered, false);
+	assert.equal(result.error, undefined);
+	assert.equal(result.modelAttempt.success, true);
+});
+
+test("1.8 explicit mutation guard policy ignores implementation discussion unless edits are required", () => {
+	const result = classifyChildRunResult({
+		agent: "architect",
+		task: "Create implementation plan to refactor module layout and update imports",
+		mutationGuardPolicy: "explicit",
+		run: {
+			exitCode: 0,
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Plan: 1. inspect files 2. edit imports." }],
+				},
+			] as Message[],
+			usage: usage(),
+		},
+	});
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.completionGuardTriggered, false);
+	assert.equal(result.error, undefined);
+	assert.equal(result.modelAttempt.success, true);
+});
+
+test("1.9 explicit mutation guard policy requires mutations for direct edit instructions", () => {
+	const result = classifyChildRunResult({
+		agent: "reviewer",
+		task: "Review and apply fixes directly",
+		mutationGuardPolicy: "explicit",
+		run: {
+			exitCode: 0,
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Done." }],
+				},
+			] as Message[],
+			usage: usage(),
+		},
+	});
+
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.completionGuardTriggered, true);
+	assert.match(result.error ?? "", /completed without making edits/i);
+	assert.equal(result.modelAttempt.success, false);
+});
+
+test("1.10 never mutation guard policy lets custom review agents discuss refactors", () => {
+	const result = classifyChildRunResult({
+		agent: "architect",
+		task: "Review this proposed refactor and update plan",
+		mutationGuardPolicy: "never",
+		run: {
+			exitCode: 0,
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Recommendation: proceed." }],
+				},
+			] as Message[],
+			usage: usage(),
+		},
+	});
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.completionGuardTriggered, false);
+	assert.equal(result.error, undefined);
+	assert.equal(result.modelAttempt.success, true);
+});
+
+test("1.11 always mutation guard policy fails success without mutations", () => {
+	const result = classifyChildRunResult({
+		agent: "writer",
+		task: "Summarize status",
+		mutationGuardPolicy: "always",
+		run: {
+			exitCode: 0,
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Done." }],
+				},
+			] as Message[],
+			usage: usage(),
+		},
+	});
+
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.completionGuardTriggered, true);
+	assert.match(result.error ?? "", /completed without making edits/i);
+	assert.equal(result.modelAttempt.success, false);
+});
+
+test("1.12/1.13 run.error with zero exit fails; stderr used when non-zero has no explicit error", () => {
 	const explicitError = classifyChildRunResult({
 		agent: "worker",
 		task: "implement fix",

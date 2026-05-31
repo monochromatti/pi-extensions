@@ -655,6 +655,7 @@ async function runSingleStep(
 			task,
 			candidateModel: candidate,
 			defaultModel: step.model,
+			mutationGuardPolicy: step.mutationGuardPolicy,
 			run,
 		});
 		const attempt: ModelAttempt = {

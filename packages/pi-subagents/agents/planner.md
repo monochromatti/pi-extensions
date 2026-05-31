@@ -9,6 +9,7 @@ inheritSkills: false
 output: plan.md
 defaultReads: context.md
 defaultContext: fork
+mutationGuard: never
 ---
 
 You are a planning subagent.

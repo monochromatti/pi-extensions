@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { OutputMode } from "../shared/types.ts";
+import { defaultCompletionMutationGuardPolicy, type CompletionMutationGuardPolicy } from "../shared/mutation-guard-policy.ts";
 import { KNOWN_FIELDS } from "./agent-serializer.ts";
 import { mergeAgentsForScope } from "./agent-selection.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
@@ -44,6 +44,7 @@ export interface BuiltinAgentOverrideBase {
 	skills?: string[];
 	tools?: string[];
 	mcpDirectTools?: string[];
+	mutationGuardPolicy: CompletionMutationGuardPolicy;
 }
 
 interface BuiltinAgentOverrideConfig {
@@ -56,6 +57,7 @@ interface BuiltinAgentOverrideConfig {
 	defaultContext?: AgentDefaultContext | false;
 	disabled?: boolean;
 	systemPrompt?: string;
+	mutationGuard?: CompletionMutationGuardPolicy | false;
 	skills?: string[] | false;
 	tools?: string[] | false;
 }
@@ -90,6 +92,7 @@ export interface AgentConfig {
 	defaultProgress?: boolean;
 	interactive?: boolean;
 	maxSubagentDepth?: number;
+	mutationGuardPolicy: CompletionMutationGuardPolicy;
 	disabled?: boolean;
 	extraFields?: Record<string, string>;
 	override?: BuiltinAgentOverrideInfo;
@@ -107,6 +110,7 @@ interface AgentModelConfig {
 	model?: string | false;
 	fallbackModels?: string[] | false;
 	thinking?: string | false;
+	mutationGuard?: CompletionMutationGuardPolicy | false;
 }
 
 interface AgentDiscoveryResult {
@@ -162,6 +166,7 @@ function cloneOverrideBase(agent: AgentConfig): BuiltinAgentOverrideBase {
 		skills: agent.skills ? [...agent.skills] : undefined,
 		tools: agent.tools ? [...agent.tools] : undefined,
 		mcpDirectTools: agent.mcpDirectTools ? [...agent.mcpDirectTools] : undefined,
+		mutationGuardPolicy: agent.mutationGuardPolicy,
 	};
 }
 
@@ -178,6 +183,7 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 		...(override.defaultContext !== undefined ? { defaultContext: override.defaultContext } : {}),
 		...(override.disabled !== undefined ? { disabled: override.disabled } : {}),
 		...(override.systemPrompt !== undefined ? { systemPrompt: override.systemPrompt } : {}),
+		...(override.mutationGuard !== undefined ? { mutationGuard: override.mutationGuard } : {}),
 		...(override.skills !== undefined ? { skills: override.skills === false ? false : [...override.skills] } : {}),
 		...(override.tools !== undefined ? { tools: override.tools === false ? false : [...override.tools] } : {}),
 	};
@@ -321,6 +327,14 @@ function parseBuiltinOverrideEntry(
 		else throw new Error(`Builtin override '${name}' in '${filePath}' has invalid 'systemPrompt'; expected a string.`);
 	}
 
+	if ("mutationGuard" in input) {
+		if (input.mutationGuard === "auto" || input.mutationGuard === "never" || input.mutationGuard === "explicit" || input.mutationGuard === "always" || input.mutationGuard === false) {
+			override.mutationGuard = input.mutationGuard;
+		} else {
+			throw new Error(`Builtin override '${name}' in '${filePath}' has invalid 'mutationGuard'; expected 'auto', 'never', 'explicit', 'always', or false.`);
+		}
+	}
+
 	const fallbackModels = parseOverrideStringArrayOrFalse(input.fallbackModels, { filePath, name, field: "fallbackModels" });
 	if (fallbackModels !== undefined) override.fallbackModels = fallbackModels;
 
@@ -353,6 +367,14 @@ function parseAgentModelConfigEntry(
 	if ("thinking" in input) {
 		if (typeof input.thinking === "string" || input.thinking === false) config.thinking = input.thinking;
 		else throw new Error(`Agent config '${name}' in '${filePath}' has invalid 'thinking'; expected a string or false.`);
+	}
+
+	if ("mutationGuard" in input) {
+		if (input.mutationGuard === "auto" || input.mutationGuard === "never" || input.mutationGuard === "explicit" || input.mutationGuard === "always" || input.mutationGuard === false) {
+			config.mutationGuard = input.mutationGuard;
+		} else {
+			throw new Error(`Agent config '${name}' in '${filePath}' has invalid 'mutationGuard'; expected 'auto', 'never', 'explicit', 'always', or false.`);
+		}
 	}
 
 	const fallbackModels = parseOverrideStringArrayOrFalse(input.fallbackModels, { filePath, name, field: "fallbackModels" });
@@ -402,6 +424,7 @@ function applyAgentModelConfig(agent: AgentConfig, config: AgentModelConfig): Ag
 	if (config.model !== undefined) next.model = config.model === false ? undefined : config.model;
 	if (config.fallbackModels !== undefined) next.fallbackModels = config.fallbackModels === false ? undefined : [...config.fallbackModels];
 	if (config.thinking !== undefined) next.thinking = config.thinking === false ? undefined : config.thinking;
+	if (config.mutationGuard !== undefined) next.mutationGuardPolicy = config.mutationGuard === false ? defaultCompletionMutationGuardPolicy(agent.localName ?? agent.name) : config.mutationGuard;
 	return next;
 }
 
@@ -426,6 +449,7 @@ function applyBuiltinOverride(
 	if (override.defaultContext !== undefined) next.defaultContext = override.defaultContext === false ? undefined : override.defaultContext;
 	if (override.disabled !== undefined) next.disabled = override.disabled;
 	if (override.systemPrompt !== undefined) next.systemPrompt = override.systemPrompt;
+	if (override.mutationGuard !== undefined) next.mutationGuardPolicy = override.mutationGuard === false ? defaultCompletionMutationGuardPolicy(agent.localName ?? agent.name) : override.mutationGuard;
 	if (override.skills !== undefined) next.skills = override.skills === false ? undefined : [...override.skills];
 	if (override.tools !== undefined) {
 		const { tools, mcpDirectTools } = splitToolList(override.tools === false ? [] : override.tools);
@@ -489,7 +513,7 @@ function applySettingsAgentConfigs(agents: AgentConfig[], userSettings: Subagent
 
 export function buildBuiltinOverrideConfig(
 	base: BuiltinAgentOverrideBase,
-	draft: Pick<AgentConfig, "model" | "fallbackModels" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritSkills" | "defaultContext" | "disabled" | "systemPrompt" | "skills" | "tools" | "mcpDirectTools">,
+	draft: Pick<AgentConfig, "model" | "fallbackModels" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritSkills" | "defaultContext" | "disabled" | "systemPrompt" | "mutationGuardPolicy" | "skills" | "tools" | "mcpDirectTools">,
 ): BuiltinAgentOverrideConfig | undefined {
 	const override: BuiltinAgentOverrideConfig = {};
 
@@ -502,6 +526,7 @@ export function buildBuiltinOverrideConfig(
 	if (draft.defaultContext !== base.defaultContext) override.defaultContext = draft.defaultContext ?? false;
 	if (draft.disabled !== base.disabled) override.disabled = draft.disabled ?? false;
 	if (draft.systemPrompt !== base.systemPrompt) override.systemPrompt = draft.systemPrompt;
+	if (draft.mutationGuardPolicy !== base.mutationGuardPolicy) override.mutationGuard = draft.mutationGuardPolicy;
 	if (!arraysEqual(draft.skills, base.skills)) override.skills = draft.skills ? [...draft.skills] : false;
 
 	const baseTools = joinToolList(base);
@@ -672,6 +697,15 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 		}
 
 		const parsedMaxSubagentDepth = Number(frontmatter.maxSubagentDepth);
+		const mutationGuardPolicy = frontmatter.mutationGuard === "never"
+			? "never" as const
+			: frontmatter.mutationGuard === "explicit"
+				? "explicit" as const
+				: frontmatter.mutationGuard === "always"
+					? "always" as const
+					: frontmatter.mutationGuard === "auto"
+						? "auto" as const
+						: defaultCompletionMutationGuardPolicy(localName);
 
 		agents.push({
 			name: runtimeName,
@@ -700,6 +734,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 				Number.isInteger(parsedMaxSubagentDepth) && parsedMaxSubagentDepth >= 0
 					? parsedMaxSubagentDepth
 					: undefined,
+			mutationGuardPolicy,
 			extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
 		});
 	}

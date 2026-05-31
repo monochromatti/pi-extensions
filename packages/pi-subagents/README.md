@@ -73,7 +73,8 @@ Use `~/.pi/agent/settings.json` (user) or `.pi/settings.json` (project).
         "fallbackModels": ["anthropic/claude-sonnet-4-5"]
       },
       "researcher": {
-        "thinking": "medium"
+        "thinking": "medium",
+        "mutationGuard": "never"
       }
     },
     "agentOverrides": {
@@ -87,9 +88,10 @@ Use `~/.pi/agent/settings.json` (user) or `.pi/settings.json` (project).
 ```
 
 Notes:
-- `subagents.agents` applies model/thinking/fallback config to any discovered agent name.
+- `subagents.agents` applies model/thinking/fallback/mutationGuard config to any discovered agent name.
 - `subagents.agentOverrides` remains builtin-agent override path.
 - Project settings override user settings.
+- Agent frontmatter and settings support `mutationGuard: auto | never | explicit | always`. Builtins use `auto` for writer agents, `explicit` for reviewer, and `never` for oracle/planner/researcher. `always` still respects explicit no-edit/review-only instructions.
 
 ## Runtime model/thinking overrides
 

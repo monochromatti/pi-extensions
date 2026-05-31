@@ -7,6 +7,7 @@ import type {
 	SavedOutputReference,
 	Usage,
 } from "../../shared/types.ts";
+import type { CompletionMutationGuardPolicy } from "../../shared/mutation-guard-policy.ts";
 import {
 	prepareChildRun,
 	type ChildRunRequest,
@@ -32,6 +33,7 @@ export interface ChildAgentRunInput {
 	};
 	modelCandidates?: string[];
 	defaultModel?: string;
+	mutationGuardPolicy?: CompletionMutationGuardPolicy;
 	outputPath?: string;
 	outputMode?: OutputMode;
 	truncatedOutput?: string;
@@ -186,6 +188,7 @@ export async function runChildAgent(input: ChildAgentRunInput, adapters: ChildAg
 			task: input.task,
 			candidateModel: candidate,
 			defaultModel: input.defaultModel,
+			mutationGuardPolicy: input.mutationGuardPolicy,
 			run: {
 				exitCode: run.exitCode,
 				messages: run.messages,

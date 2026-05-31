@@ -21,6 +21,7 @@ export const KNOWN_FIELDS = new Set([
 	"defaultProgress",
 	"interactive",
 	"maxSubagentDepth",
+	"mutationGuard",
 ]);
 
 function joinComma(values: string[] | undefined): string | undefined {
@@ -69,6 +70,7 @@ export function serializeAgent(config: AgentConfig): string {
 	if (Number.isInteger(config.maxSubagentDepth) && config.maxSubagentDepth >= 0) {
 		lines.push(`maxSubagentDepth: ${config.maxSubagentDepth}`);
 	}
+	lines.push(`mutationGuard: ${config.mutationGuardPolicy}`);
 
 	if (config.extraFields) {
 		for (const [key, value] of Object.entries(config.extraFields)) {

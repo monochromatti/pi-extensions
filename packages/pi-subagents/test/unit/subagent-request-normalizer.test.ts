@@ -9,7 +9,7 @@ import {
 } from "../../src/runs/foreground/subagent-request-normalizer.ts";
 
 function agent(name: string, defaultContext?: "fresh" | "fork"): AgentConfig {
-	return { name, description: `${name} agent`, systemPrompt: "test", ...(defaultContext ? { defaultContext } : {}) } as AgentConfig;
+	return { name, description: `${name} agent`, systemPrompt: "test", mutationGuardPolicy: "auto", ...(defaultContext ? { defaultContext } : {}) } as AgentConfig;
 }
 
 function surfaceRun(params: Parameters<typeof normalizeSubagentSurfaceRequest>[0]["rawParams"]) {

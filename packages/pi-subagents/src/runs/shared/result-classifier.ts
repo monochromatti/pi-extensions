@@ -1,6 +1,7 @@
 import type { Message } from "@earendil-works/pi-ai";
 import type { ModelAttempt, Usage } from "../../shared/types.ts";
 import { detectSubagentError } from "../../shared/error-detection.ts";
+import type { CompletionMutationGuardPolicy } from "../../shared/mutation-guard-policy.ts";
 import { evaluateCompletionMutationGuard } from "./completion-guard.ts";
 
 const COMPLETION_GUARD_ERROR = "Subagent completed without making edits for an implementation task.\nIt appears to have returned planning or scratchpad output instead of applying changes.";
@@ -21,6 +22,7 @@ interface ClassifyChildRunResultInput {
 	run: ChildRunData;
 	candidateModel?: string;
 	defaultModel?: string;
+	mutationGuardPolicy?: CompletionMutationGuardPolicy;
 }
 
 interface ClassifyChildRunResultOutput {
@@ -40,6 +42,7 @@ export function classifyChildRunResult(input: ClassifyChildRunResultInput): Clas
 			agent: input.agent,
 			task: input.task,
 			messages: input.run.messages,
+			policy: input.mutationGuardPolicy,
 		})
 		: undefined;
 	const completionGuardTriggered = completionGuard?.triggered === true && !input.run.observedMutationAttempt;

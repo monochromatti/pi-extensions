@@ -1,4 +1,5 @@
 import type { Message } from "@earendil-works/pi-ai";
+import { defaultCompletionMutationGuardPolicy, type CompletionMutationGuardPolicy } from "../../shared/mutation-guard-policy.ts";
 import { isMutatingBashCommand } from "./long-running-guard.ts";
 
 const REVIEW_ONLY_PATTERNS = [
@@ -32,12 +33,6 @@ const SCOPED_NO_EDIT_CONSTRAINT_PATTERNS = [
 	/\bdo not modify\s+unrelated files?\b/i,
 ];
 
-const RESEARCH_AGENT_PATTERNS = [
-	/\binvestigate\b/i,
-	/\bscout\b/i,
-	/\bresearch(?:er)?\b/i,
-];
-
 const WORKER_IMPLEMENTATION_PATTERNS = [
 	/\b(?:implement|fix|edit|modify|patch|refactor|delete)\b/i,
 	/\b(?:update|add|remove|replace|create)\b(?!\s+(?:(?:a|an|the)\s+)?(?:report|summary|findings?)(?:\b|$))/i,
@@ -59,6 +54,7 @@ interface CompletionMutationGuardInput {
 	agent: string;
 	task: string;
 	messages: Message[];
+	policy?: CompletionMutationGuardPolicy;
 }
 
 interface CompletionMutationGuardResult {
@@ -83,14 +79,15 @@ function stripScopedNoEditConstraints(task: string): string {
 	return stripped;
 }
 
-export function expectsImplementationMutation(agent: string, task: string): boolean {
+export function expectsImplementationMutation(agent: string, task: string, policy: CompletionMutationGuardPolicy = defaultCompletionMutationGuardPolicy(agent)): boolean {
 	const taskText = stripFrameworkInstructions(task);
 	const taskTextWithoutScopedConstraints = stripScopedNoEditConstraints(taskText);
 	if (REVIEW_ONLY_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
 	if (EXPLICIT_NO_EDIT_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
 
-	if (RESEARCH_AGENT_PATTERNS.some((pattern) => pattern.test(agent))) return false;
-	if (/\breviewer\b/i.test(agent)) return REVIEWER_REQUIRED_EDIT_PATTERNS.some((pattern) => pattern.test(taskText));
+	if (policy === "never") return false;
+	if (policy === "always") return true;
+	if (policy === "explicit") return REVIEWER_REQUIRED_EDIT_PATTERNS.some((pattern) => pattern.test(taskText));
 
 	const workerIntent = agent === "worker" && WORKER_IMPLEMENTATION_PATTERNS.some((pattern) => pattern.test(taskText));
 	if (workerIntent) return true;
@@ -115,7 +112,7 @@ export function hasMutationToolCall(messages: Message[]): boolean {
 }
 
 export function evaluateCompletionMutationGuard(input: CompletionMutationGuardInput): CompletionMutationGuardResult {
-	const expectedMutation = expectsImplementationMutation(input.agent, input.task);
+	const expectedMutation = expectsImplementationMutation(input.agent, input.task, input.policy);
 	const attemptedMutation = hasMutationToolCall(input.messages);
 	return {
 		expectedMutation,

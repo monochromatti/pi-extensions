@@ -643,6 +643,7 @@ async function runSingleAttempt(
 		agent: agent.name,
 		task,
 		candidateModel: model,
+		mutationGuardPolicy: agent.mutationGuardPolicy,
 		run: {
 			exitCode: result.exitCode,
 			error: result.error,

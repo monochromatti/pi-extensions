@@ -1,6 +1,9 @@
+import type { CompletionMutationGuardPolicy } from "../../shared/mutation-guard-policy.ts";
+
 export interface RunnerSubagentStep {
 	agent: string;
 	task: string;
+	mutationGuardPolicy?: CompletionMutationGuardPolicy;
 	cwd?: string;
 	model?: string;
 	modelCandidates?: string[];
