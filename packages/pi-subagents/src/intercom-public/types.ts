@@ -11,21 +11,57 @@ export interface SessionSubagentMetadata {
   index: number;
 }
 
-export interface SessionInfo {
-  id: string;
-  piSessionId?: string;
-  protocolVersion?: number;
-  capabilities?: string[];
-  namespace?: string;
-  name?: string;
+export const INTERCOM_LEASE_TTL_MS = 30_000;
+export const INTERCOM_HEARTBEAT_INTERVAL_MS = 10_000;
+
+export interface IntercomRegistration {
+  piSessionId: string;
+  alias: string;
+  namespace: string;
   cwd: string;
   model: string;
   pid: number;
   startedAt: number;
   lastActivity: number;
+  leaseTtlMs: number;
+  heartbeatIntervalMs: number;
   status?: string;
   readiness?: SessionReadiness;
   subagent?: SessionSubagentMetadata;
+}
+
+export interface SessionInfo extends IntercomRegistration {
+  id: string;
+}
+
+export function buildIntercomRegistration(input: {
+  piSessionId: string;
+  alias: string;
+  namespace: string;
+  cwd: string;
+  model: string;
+  pid?: number;
+  startedAt: number;
+  lastActivity?: number;
+  status?: string;
+  readiness?: SessionReadiness;
+  subagent?: SessionSubagentMetadata;
+}): IntercomRegistration {
+  return {
+    piSessionId: input.piSessionId,
+    alias: input.alias,
+    namespace: input.namespace,
+    cwd: input.cwd,
+    model: input.model,
+    pid: input.pid ?? process.pid,
+    startedAt: input.startedAt,
+    lastActivity: input.lastActivity ?? Date.now(),
+    leaseTtlMs: INTERCOM_LEASE_TTL_MS,
+    heartbeatIntervalMs: INTERCOM_HEARTBEAT_INTERVAL_MS,
+    ...(input.status ? { status: input.status } : {}),
+    ...(input.readiness ? { readiness: input.readiness } : {}),
+    ...(input.subagent ? { subagent: input.subagent } : {}),
+  };
 }
 
 export interface Message {
@@ -56,16 +92,20 @@ export interface SendTargetEnvelope {
   piSessionId?: string;
   alias?: string;
   namespace?: string;
+  global?: boolean;
 }
 
+export type IntercomMessageOrigin = "manual" | "machine";
+
 export type ClientMessage =
-  | { type: "register"; session: Omit<SessionInfo, "id"> }
+  | { type: "register"; session: IntercomRegistration }
   | { type: "unregister" }
   | { type: "list"; requestId: string }
-  | { type: "send"; to: string | SendTargetEnvelope; message: Message }
+  | { type: "send"; to: string | SendTargetEnvelope; message: Message; origin?: IntercomMessageOrigin }
+  | { type: "heartbeat" }
   | {
     type: "presence";
-    name?: string;
+    alias?: string;
     status?: string;
     model?: string;
     readiness?: SessionReadiness;

@@ -342,15 +342,12 @@ function emitControlNotification(input: {
 }
 
 function resolveIntercomRelayTarget(intercomBridge: IntercomBridgeState): IntercomRelayTarget | undefined {
-	if (!intercomBridge.active || !intercomBridge.orchestratorTarget) return undefined;
-	if (intercomBridge.supervisorTarget) {
-		return {
-			intercomSessionId: intercomBridge.supervisorTarget.intercomSessionId,
-			piSessionId: intercomBridge.supervisorTarget.piSessionId,
-			alias: intercomBridge.supervisorTarget.alias,
-		};
-	}
-	return { alias: intercomBridge.orchestratorTarget };
+	if (!intercomBridge.active || !intercomBridge.supervisorTarget) return undefined;
+	return {
+		intercomSessionId: intercomBridge.supervisorTarget.intercomSessionId,
+		piSessionId: intercomBridge.supervisorTarget.piSessionId,
+		alias: intercomBridge.supervisorTarget.alias,
+	};
 }
 
 function interruptAsyncRun(state: SubagentState, runId: string | undefined): AgentToolResult<Details> | null {

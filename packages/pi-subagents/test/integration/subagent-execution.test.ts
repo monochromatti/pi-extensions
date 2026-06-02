@@ -219,18 +219,18 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 		});
 	});
 
-	it("6.5/6.6 bridge failure keeps protocol/capability reason clear while manual mode stays unaffected", async () => {
+	it("6.5/6.6 bridge failure keeps registration reason clear while manual mode stays unaffected", async () => {
 		await withIntercomBridgeHome(tempDir, async () => {
 			mockPi.onCall({ output: "manual-mode-still-runs" });
 
 			const bridgeExecutor = makeExecutor(
 				[makeAgent("worker")],
 				{ intercomBridge: { mode: "always" } },
-				{ supervisorTargetError: "Intercom session missing required capability: piSessionId-routing" },
+				{ supervisorTargetError: "Intercom session missing exact identity" },
 			);
 
 			const failed = await bridgeExecutor.execute(
-				"bridge-capability-fail",
+				"bridge-registration-fail",
 				{ agent: "worker", task: "Should fail with clear bridge reason" },
 				new AbortController().signal,
 				undefined,
@@ -239,7 +239,7 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 
 			assert.equal(failed.isError, true);
 			assert.match(failed.content[0]?.text ?? "", /Subagent intercom bridge is active, but parent intercom registration failed/);
-			assert.match(failed.content[0]?.text ?? "", /missing required capability: piSessionId-routing/);
+			assert.match(failed.content[0]?.text ?? "", /missing exact identity/);
 
 			const manualExecutor = makeExecutor([makeAgent("worker")], { intercomBridge: { mode: "off" } });
 			const manual = await manualExecutor.execute(

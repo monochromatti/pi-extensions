@@ -5,14 +5,14 @@ import { homedir } from "os";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerSocketDir, getBrokerSocketPath } from "./paths.ts";
-import type {
-  SessionInfo,
-  SessionReadiness,
-  SessionSubagentMetadata,
-  Message,
-  Attachment,
-  BrokerMessage,
-  SendTargetEnvelope,
+import {
+  type SessionInfo,
+  type SessionReadiness,
+  type SessionSubagentMetadata,
+  type Message,
+  type Attachment,
+  type BrokerMessage,
+  type SendTargetEnvelope,
 } from "../types.ts";
 
 const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
@@ -113,6 +113,9 @@ function isSendTargetEnvelope(value: unknown): value is SendTargetEnvelope {
   if (target.namespace !== undefined && typeof target.namespace !== "string") {
     return false;
   }
+  if (target.global !== undefined && typeof target.global !== "boolean") {
+    return false;
+  }
 
   return true;
 }
@@ -165,21 +168,21 @@ function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id">
     return false;
   }
 
-  if (session.name !== undefined && typeof session.name !== "string") {
+  if (typeof session.alias !== "string" || session.alias.trim() === "") {
     return false;
   }
 
-  if (session.namespace !== undefined && typeof session.namespace !== "string") {
+  if (typeof session.namespace !== "string" || session.namespace.trim() === "") {
     return false;
   }
 
-  if (session.piSessionId !== undefined && typeof session.piSessionId !== "string") {
+  if (typeof session.piSessionId !== "string" || session.piSessionId.trim() === "") {
     return false;
   }
-  if (session.protocolVersion !== undefined && typeof session.protocolVersion !== "number") {
+  if (typeof session.leaseTtlMs !== "number" || !Number.isFinite(session.leaseTtlMs) || session.leaseTtlMs < 0) {
     return false;
   }
-  if (session.capabilities !== undefined && (!Array.isArray(session.capabilities) || !session.capabilities.every(capability => typeof capability === "string"))) {
+  if (typeof session.heartbeatIntervalMs !== "number" || !Number.isFinite(session.heartbeatIntervalMs) || session.heartbeatIntervalMs < 0) {
     return false;
   }
   if (session.readiness !== undefined && !isSessionReadiness(session.readiness)) {
@@ -271,6 +274,15 @@ class IntercomBroker {
     const clientMessage = msg as { type: string } & Record<string, unknown>;
 
     if (currentId === null && clientMessage.type !== "register") {
+      if (clientMessage.type === "send" && clientMessage.origin === "machine") {
+        const message = clientMessage.message;
+        writeMessage(socket, {
+          type: "delivery_failed",
+          messageId: isMessage(message) ? message.id : "unknown",
+          reason: "unregistered-sender",
+        });
+        return;
+      }
       throw new Error(`Received ${clientMessage.type} before register`);
     }
 
@@ -286,12 +298,11 @@ class IntercomBroker {
         
         const id = randomUUID();
         setId(id);
+        const now = Date.now();
         const info: SessionInfo = {
           ...clientMessage.session,
           id,
-          piSessionId: clientMessage.session.piSessionId ?? `legacy:${id}`,
-          protocolVersion: clientMessage.session.protocolVersion ?? 1,
-          capabilities: clientMessage.session.capabilities ?? [],
+          lastActivity: now,
         };
         this.sessions.set(id, { socket, info });
         
@@ -318,6 +329,7 @@ class IntercomBroker {
           throw new Error("Invalid list message");
         }
 
+        this.expireInactiveSessions();
         const sessions = Array.from(this.sessions.values()).map(s => s.info);
         writeMessage(socket, { type: "sessions", requestId: clientMessage.requestId, sessions });
         break;
@@ -336,6 +348,14 @@ class IntercomBroker {
           break;
         }
 
+        if ("from" in clientMessage) {
+          writeMessage(socket, {
+            type: "delivery_failed",
+            messageId: message.id,
+            reason: "forged-from-field",
+          });
+          break;
+        }
         const fromSession = this.sessions.get(currentId);
         if (!fromSession) {
           writeMessage(socket, {
@@ -346,7 +366,20 @@ class IntercomBroker {
           break;
         }
 
-        const resolvedTarget = this.resolveSendTarget(clientMessage.to);
+        const origin = clientMessage.origin === "machine" ? "machine" : "manual";
+        if (origin === "machine") {
+          if (!this.isExactMachineTarget(clientMessage.to)) {
+            writeMessage(socket, {
+              type: "delivery_failed",
+              messageId: message.id,
+              reason: "unsafe-machine-alias-target",
+            });
+            break;
+          }
+        }
+
+        this.expireInactiveSessions();
+        const resolvedTarget = this.resolveSendTarget(clientMessage.to, fromSession.info);
         if (resolvedTarget.error) {
           writeMessage(socket, {
             type: "delivery_failed",
@@ -384,11 +417,11 @@ class IntercomBroker {
       case "presence": {
         const session = this.sessions.get(currentId);
         if (session) {
-          if (clientMessage.name !== undefined) {
-            if (typeof clientMessage.name !== "string") {
+          if (clientMessage.alias !== undefined) {
+            if (typeof clientMessage.alias !== "string") {
               throw new Error("Invalid presence name");
             }
-            session.info.name = clientMessage.name;
+            session.info.alias = clientMessage.alias;
           }
           if (clientMessage.status !== undefined) {
             if (typeof clientMessage.status !== "string") {
@@ -420,12 +453,34 @@ class IntercomBroker {
         break;
       }
 
+      case "heartbeat": {
+        const session = this.sessions.get(currentId);
+        if (session) {
+          session.info.lastActivity = Date.now();
+        }
+        break;
+      }
+
       default:
         throw new Error(`Unknown client message type: ${clientMessage.type}`);
     }
   }
 
-  private resolveSendTarget(target: string | SendTargetEnvelope): {
+  private isExactMachineTarget(target: string | SendTargetEnvelope): target is SendTargetEnvelope {
+    return typeof target !== "string" && Boolean(target.intercomSessionId || target.piSessionId);
+  }
+
+  private expireInactiveSessions(now = Date.now()): void {
+    for (const [id, session] of this.sessions) {
+      const ttl = session.info.leaseTtlMs;
+      if (typeof ttl === "number" && ttl >= 0 && session.info.lastActivity + ttl <= now) {
+        this.sessions.delete(id);
+        this.broadcast({ type: "session_left", sessionId: id }, id);
+      }
+    }
+  }
+
+  private resolveSendTarget(target: string | SendTargetEnvelope, sender?: SessionInfo): {
     session: ConnectedSession | null;
     receiver?: Message["to"];
     error?: string;
@@ -435,7 +490,7 @@ class IntercomBroker {
       if (byId) {
         return { session: byId };
       }
-      const byAlias = this.findByAlias(target);
+      const byAlias = this.findByAlias(target, sender?.namespace);
       if (byAlias.length > 1) {
         return {
           session: null,
@@ -451,7 +506,7 @@ class IntercomBroker {
     if (target.intercomSessionId) {
       const byId = this.sessions.get(target.intercomSessionId);
       if (byId) {
-        return { session: byId, receiver: { intercomSessionId: byId.info.id, piSessionId: byId.info.piSessionId, alias: byId.info.name } };
+        return { session: byId, receiver: { intercomSessionId: byId.info.id, piSessionId: byId.info.piSessionId, alias: byId.info.alias } };
       }
     }
 
@@ -461,17 +516,18 @@ class IntercomBroker {
         return {
           session: null,
           receiver: { intercomSessionId: target.intercomSessionId, piSessionId: target.piSessionId, alias: target.alias },
-          error: this.formatAmbiguousTargetError(`piSessionId:${target.piSessionId}`, byPiSessionId),
+          error: this.formatAmbiguousTargetError(`piSessionId:${target.piSessionId}`, byPiSessionId, "duplicate-pi-session-conflict"),
         };
       }
       if (byPiSessionId.length === 1) {
         const resolved = byPiSessionId[0]!;
-        return { session: resolved, receiver: { intercomSessionId: resolved.info.id, piSessionId: resolved.info.piSessionId, alias: resolved.info.name } };
+        return { session: resolved, receiver: { intercomSessionId: resolved.info.id, piSessionId: resolved.info.piSessionId, alias: resolved.info.alias } };
       }
     }
 
     if (target.alias) {
-      const scoped = this.findByAlias(target.alias, target.namespace);
+      const aliasNamespace = target.global ? undefined : (target.namespace ?? sender?.namespace);
+      const scoped = this.findByAlias(target.alias, aliasNamespace);
       if (scoped.length > 1) {
         return {
           session: null,
@@ -481,10 +537,10 @@ class IntercomBroker {
       }
       if (scoped.length === 1) {
         const resolved = scoped[0]!;
-        return { session: resolved, receiver: { intercomSessionId: resolved.info.id, piSessionId: resolved.info.piSessionId, alias: resolved.info.name } };
+        return { session: resolved, receiver: { intercomSessionId: resolved.info.id, piSessionId: resolved.info.piSessionId, alias: resolved.info.alias } };
       }
 
-      if (target.namespace) {
+      if (aliasNamespace) {
         return {
           session: null,
           receiver: { intercomSessionId: target.intercomSessionId, piSessionId: target.piSessionId, alias: target.alias },
@@ -505,7 +561,7 @@ class IntercomBroker {
   private findByAlias(alias: string, namespace?: string): ConnectedSession[] {
     const lowerAlias = alias.toLowerCase();
     const values = Array.from(this.sessions.values()).filter((session) => {
-      if (session.info.name?.toLowerCase() !== lowerAlias) {
+      if (session.info.alias.toLowerCase() !== lowerAlias) {
         return false;
       }
       if (namespace === undefined) {
@@ -523,11 +579,15 @@ class IntercomBroker {
     return values;
   }
 
-  private formatAmbiguousTargetError(label: string, candidates: ConnectedSession[]): string {
+  private formatAmbiguousTargetError(label: string, candidates: ConnectedSession[], code = "ambiguous-target"): string {
     const details = candidates
-      .map((candidate) => `${candidate.info.id}(name=${candidate.info.name ?? "-"},cwd=${candidate.info.cwd})`)
+      .map((candidate) => `${candidate.info.id}(piSessionId=${candidate.info.piSessionId},alias=${candidate.info.alias},namespace=${candidate.info.namespace},cwd=${candidate.info.cwd},pid=${candidate.info.pid},startedAt=${candidate.info.startedAt},leaseExpiresAt=${this.leaseExpiresAt(candidate.info)})`)
       .join(", ");
-    return `Ambiguous target "${label}". Candidates: ${details}`;
+    return `${code}: Ambiguous target "${label}". Candidates: ${details}`;
+  }
+
+  private leaseExpiresAt(session: SessionInfo): number | undefined {
+    return typeof session.leaseTtlMs === "number" ? session.lastActivity + session.leaseTtlMs : undefined;
   }
 
   private broadcast(msg: BrokerMessage, exclude?: string): void {

@@ -10,7 +10,7 @@ import registerIntercomExtension, {
   type IntercomRuntimeScheduler,
 } from "../../src/intercom-public/index.ts";
 import { IntercomClient } from "../../src/intercom-public/broker/client.ts";
-import type { Message, SessionInfo } from "../../src/intercom-public/types.ts";
+import { type Message, type SessionInfo } from "../../src/intercom-public/types.ts";
 import { getIntercomSupervisorTargetResolver } from "../../src/intercom-public/supervisor-target-resolver.ts";
 
 const packageDir = process.cwd().endsWith(path.join("packages", "pi-subagents"))
@@ -259,7 +259,56 @@ function parseSessionIdFromStatus(result: CapturedToolResult): string {
 }
 
 
-test("2.1 session-scoped runtime keeps inbox isolated after later session start", { concurrency: false }, async () => {
+test("leak regression: unrelated machine ask only displays on addressed target across namespaces", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+    const receiver = await createIntercomHarness("same-alias");
+    const machine = new IntercomClient();
+    const ctxA = createContext("pi-session-a", { idle: true, cwd: "/repo/a", hasUI: true });
+    const ctxB = createContext("pi-session-b", { idle: true, cwd: "/repo/b", hasUI: true });
+    try {
+      await receiver.emit("session_start", ctxA);
+      const statusA = await receiver.tool("intercom").execute("status-a", { action: "status" }, new AbortController().signal, undefined, ctxA);
+      const intercomSessionA = parseSessionIdFromStatus(statusA);
+      await receiver.emit("session_start", ctxB);
+      await receiver.tool("intercom").execute("status-b", { action: "status" }, new AbortController().signal, undefined, ctxB);
+      await machine.connect({
+        alias: "machine",
+        piSessionId: "pi-machine",
+        namespace: "test-namespace",
+        cwd: "/repo/machine",
+        model: "test-model",
+        pid: process.pid,
+        startedAt: Date.now(),
+        lastActivity: Date.now(),
+        leaseTtlMs: 30_000,
+        heartbeatIntervalMs: 10_000,
+      });
+      const sent = await machine.send({ intercomSessionId: intercomSessionA, piSessionId: "pi-session-a" }, {
+        text: "machine-for-a-only",
+        expectsReply: true,
+        origin: "machine",
+      } as never);
+      assert.equal(sent.delivered, true);
+      await waitUntil(async () => /machine-for-a-only/.test(text(await receiver.tool("intercom").execute("pending-a", { action: "pending" }, new AbortController().signal, undefined, ctxA))), "A did not receive machine ask");
+      assert.doesNotMatch(text(await receiver.tool("intercom").execute("pending-b", { action: "pending" }, new AbortController().signal, undefined, ctxB)), /machine-for-a-only/);
+      assert.equal(receiver.sentMessages.some((entry) => entry.message.content?.includes("machine-for-a-only")), false);
+    } finally {
+      await machine.disconnect().catch(() => undefined);
+      await receiver.emit("session_shutdown", ctxA);
+      await receiver.emit("session_shutdown", ctxB);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("session-scoped runtime keeps inbox isolated after later session start", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -285,15 +334,16 @@ test("2.1 session-scoped runtime keeps inbox isolated after later session start"
       await receiver.emit("turn_start", ctxB);
 
       await sender.connect({
-        name: "sender",
+        alias: "sender",
         piSessionId: "pi-sender",
-        protocolVersion: 2,
-        capabilities: ["piSessionId-routing"],
+        namespace: "test-namespace",
         cwd: "/repo/sender",
         model: "test-model",
         pid: process.pid,
         startedAt: Date.now(),
         lastActivity: Date.now(),
+        leaseTtlMs: 30_000,
+        heartbeatIntervalMs: 10_000,
       });
 
       const sent = await sender.send(intercomSessionA, {
@@ -325,7 +375,7 @@ test("2.1 session-scoped runtime keeps inbox isolated after later session start"
   });
 });
 
-test("2.3 tool execution resolves runtime from execution context, not latest runtime", { concurrency: false }, async () => {
+test("tool execution resolves runtime from execution context, not latest runtime", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -361,7 +411,7 @@ test("2.3 tool execution resolves runtime from execution context, not latest run
   });
 });
 
-test("2.5 inbound broker callbacks stay bound to owning runtime instance", { concurrency: false }, async () => {
+test("inbound broker callbacks stay bound to owning runtime instance", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -386,15 +436,16 @@ test("2.5 inbound broker callbacks stay bound to owning runtime instance", { con
       await receiver.emit("turn_start", ctxA);
 
       await sender.connect({
-        name: "sender",
+        alias: "sender",
         piSessionId: "pi-sender",
-        protocolVersion: 2,
-        capabilities: ["piSessionId-routing"],
+        namespace: "test-namespace",
         cwd: "/repo/sender",
         model: "test-model",
         pid: process.pid,
         startedAt: Date.now(),
         lastActivity: Date.now(),
+        leaseTtlMs: 30_000,
+        heartbeatIntervalMs: 10_000,
       });
 
       const sent = await sender.send(intercomSessionB, {
@@ -422,7 +473,7 @@ test("2.5 inbound broker callbacks stay bound to owning runtime instance", { con
   });
 });
 
-test("2.8 replaced runtime drops delayed inbound flush from old runtime", { concurrency: false }, async () => {
+test("replaced runtime drops delayed inbound flush from old runtime", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -445,15 +496,16 @@ test("2.8 replaced runtime drops delayed inbound flush from old runtime", { conc
       scheduler.runAll();
 
       await sender.connect({
-        name: "sender",
+        alias: "sender",
         piSessionId: "pi-sender",
-        protocolVersion: 2,
-        capabilities: ["piSessionId-routing"],
+        namespace: "test-namespace",
         cwd: "/repo/sender",
         model: "test-model",
         pid: process.pid,
         startedAt: Date.now(),
         lastActivity: Date.now(),
+        leaseTtlMs: 30_000,
+        heartbeatIntervalMs: 10_000,
       });
 
       const sent = await sender.send(intercomSessionA, {
@@ -484,7 +536,7 @@ test("2.8 replaced runtime drops delayed inbound flush from old runtime", { conc
   });
 });
 
-test("5.1/5.2 result relay enforces owner session and ignores non-owner runtime B", { concurrency: false }, async () => {
+test("result relay enforces owner session and ignores non-owner runtime B", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -552,7 +604,7 @@ test("5.1/5.2 result relay enforces owner session and ignores non-owner runtime 
   });
 });
 
-test("5.3/5.4 control relay enforces owner session and ignores non-owner runtime B", { concurrency: false }, async () => {
+test("control relay enforces owner session and ignores non-owner runtime B", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -606,7 +658,7 @@ test("5.3/5.4 control relay enforces owner session and ignores non-owner runtime
   });
 });
 
-test("5.7/5.8 result relay does not deliver before child readiness and times out", { concurrency: false }, async () => {
+test("result relay does not deliver before child readiness and times out", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -627,15 +679,16 @@ test("5.7/5.8 result relay does not deliver before child readiness and times out
       });
 
       await child.connect({
-        name: "subagent-worker-run-readiness-timeout-1",
+        alias: "subagent-worker-run-readiness-timeout-1",
         piSessionId: "child-pi-session",
-        protocolVersion: 2,
-        capabilities: ["piSessionId-routing"],
+        namespace: "test-namespace",
         cwd: "/repo/child",
         model: "test-model",
         pid: process.pid,
         startedAt: Date.now(),
         lastActivity: Date.now(),
+        leaseTtlMs: 30_000,
+        heartbeatIntervalMs: 10_000,
         status: "idle",
         readiness: { state: "initializing", updatedAt: Date.now() },
         subagent: {
@@ -711,44 +764,7 @@ test("5.7/5.8 result relay does not deliver before child readiness and times out
   });
 });
 
-test("4.3/4.4 getSupervisorTarget rejects when protocol v2 capability is missing", { concurrency: false }, async () => {
-  await withBroker(async (homeDir) => {
-    const previousHome = process.env.HOME;
-    const previousUserProfile = process.env.USERPROFILE;
-    process.env.HOME = homeDir;
-    process.env.USERPROFILE = homeDir;
-
-    const harness = await createIntercomHarness("runtime-host");
-    const ctx = createContext("pi-session-a", { idle: true, cwd: "/repo/a" });
-    const originalListSessions = IntercomClient.prototype.listSessions;
-    IntercomClient.prototype.listSessions = async function patchedListSessions(this: IntercomClient) {
-      const sessions = await originalListSessions.call(this);
-      return sessions.map((session) => session.id === this.sessionId
-        ? { ...session, protocolVersion: 1, capabilities: [] }
-        : session);
-    };
-
-    try {
-      await harness.emit("session_start", ctx);
-      const resolver = getIntercomSupervisorTargetResolver(harness.hostPi as never);
-      assert.ok(resolver, "supervisor target resolver should be registered");
-
-      await assert.rejects(
-        () => resolver!.getSupervisorTarget(ctx.sessionManager.getSessionId()),
-        /protocol version|capability/i,
-      );
-    } finally {
-      IntercomClient.prototype.listSessions = originalListSessions;
-      await harness.emit("session_shutdown", ctx);
-      if (previousHome === undefined) delete process.env.HOME;
-      else process.env.HOME = previousHome;
-      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
-      else process.env.USERPROFILE = previousUserProfile;
-    }
-  });
-});
-
-test("4.5/4.6 getSupervisorTarget rejects unsafe routing when broker self piSessionId mismatches runtime session", { concurrency: false }, async () => {
+test("getSupervisorTarget rejects unsafe routing when broker self piSessionId mismatches runtime session", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -785,7 +801,77 @@ test("4.5/4.6 getSupervisorTarget rejects unsafe routing when broker self piSess
   });
 });
 
-test("3.3/3.4 mismatched receiver piSessionId is dropped before pending/UI delivery", { concurrency: false }, async () => {
+test("intercom list shows exact identity, namespace, cwd, and lease state", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+
+    const harness = await createIntercomHarness("runtime-host");
+    const ctx = createContext("pi-session-a", { cwd: "/repo/a" });
+    try {
+      await harness.emit("session_start", ctx);
+      const list = await harness.tool("intercom").execute("list-identity", { action: "list" }, new AbortController().signal, undefined, ctx);
+      const output = text(list);
+      assert.match(output, /Current session:/);
+      assert.match(output, /runtime-host/);
+      assert.match(output, /piSessionId=pi-session-a/);
+      assert.match(output, /intercomSessionId=/);
+      assert.match(output, /namespace=[a-f0-9]{16}/);
+      assert.match(output, /lease=active/);
+      assert.match(output, /\/repo\/a/);
+      assert.equal((list.details as { currentSession?: { piSessionId?: unknown; namespace?: unknown; leaseState?: unknown } }).currentSession?.piSessionId, "pi-session-a");
+      assert.equal(typeof (list.details as { currentSession?: { namespace?: unknown } }).currentSession?.namespace, "string");
+      assert.match(String((list.details as { currentSession?: { leaseState?: unknown } }).currentSession?.leaseState), /lease=active/);
+    } finally {
+      await harness.emit("session_shutdown", ctx);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("status shows identity diagnostics and resolution logs omit message bodies", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+
+    const harness = await createIntercomHarness("runtime-host");
+    const ctx = createContext("pi-session-a", { cwd: "/repo/a" });
+    try {
+      await harness.emit("session_start", ctx);
+      const failed = await harness.tool("intercom").execute("send-missing", {
+        action: "send",
+        to: "missing-target",
+        message: "SECRET BODY MUST NOT BE LOGGED",
+        waitForReadyMs: 0,
+      }, new AbortController().signal, undefined, ctx);
+      assert.equal(failed.isError, true);
+      const status = await harness.tool("intercom").execute("status-after-failure", { action: "status" }, new AbortController().signal, undefined, ctx);
+      const output = text(status);
+      assert.match(output, /Pi session ID: pi-session-a/);
+      assert.match(output, /Namespace: [a-f0-9]{16}/);
+      assert.match(output, /Lease: lease=active/);
+      assert.match(output, /Resolution failures: 1/);
+      const resolutionEntry = harness.appendEntries.find((entry) => entry.type === "intercom_resolution_failed");
+      assert.ok(resolutionEntry);
+      assert.doesNotMatch(JSON.stringify(resolutionEntry.payload), /SECRET BODY MUST NOT BE LOGGED/);
+    } finally {
+      await harness.emit("session_shutdown", ctx);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("mismatched receiver piSessionId is dropped before pending/UI delivery", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -805,14 +891,15 @@ test("3.3/3.4 mismatched receiver piSessionId is dropped before pending/UI deliv
     const from: SessionInfo = {
       id: "sender-session",
       piSessionId: "pi-sender",
-      protocolVersion: 2,
-      capabilities: ["piSessionId-routing"],
-      name: "sender",
+      namespace: "test-namespace",
+      alias: "sender",
       cwd: "/repo/sender",
       model: "test-model",
       pid: process.pid,
       startedAt: Date.now(),
       lastActivity: Date.now(),
+      leaseTtlMs: 30_000,
+      heartbeatIntervalMs: 10_000,
       status: "idle",
     };
 
@@ -855,7 +942,7 @@ test("3.3/3.4 mismatched receiver piSessionId is dropped before pending/UI deliv
   });
 });
 
-test("3.5/3.6 dropped misroute diagnostics are structured and bounded", { concurrency: false }, async () => {
+test("mismatched receiver intercomSessionId is dropped before pending/UI delivery", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -875,14 +962,84 @@ test("3.5/3.6 dropped misroute diagnostics are structured and bounded", { concur
     const from: SessionInfo = {
       id: "sender-session",
       piSessionId: "pi-sender",
-      protocolVersion: 2,
-      capabilities: ["piSessionId-routing"],
-      name: "sender",
+      namespace: "test-namespace",
+      alias: "sender",
       cwd: "/repo/sender",
       model: "test-model",
       pid: process.pid,
       startedAt: Date.now(),
       lastActivity: Date.now(),
+      leaseTtlMs: 30_000,
+      heartbeatIntervalMs: 10_000,
+      status: "idle",
+    };
+
+    try {
+      await receiver.emit("session_start", ctx);
+      await waitUntil(() => createdClients.length > 0 && Boolean(createdClients[0]!.sessionId), "runtime intercom client not created");
+
+      const runtimeClient = createdClients[0]!;
+      runtimeClient.emit("message", from, {
+        id: "misroute-intercom",
+        timestamp: Date.now(),
+        to: {
+          intercomSessionId: "wrong-intercom-session",
+          piSessionId: "pi-session-a",
+          alias: "runtime-host",
+        },
+        expectsReply: true,
+        content: { text: "wrong-intercom-must-be-dropped" },
+      } satisfies Message);
+      await wait(50);
+
+      const pending = await receiver.tool("intercom").execute("pending-after-intercom-drop", { action: "pending" }, new AbortController().signal, undefined, ctx);
+      assert.match(text(pending), /No unresolved inbound asks/);
+      assert.equal(receiver.sentMessages.some((entry) => entry.message.content?.includes("wrong-intercom-must-be-dropped")), false);
+      const dropped = receiver.appendEntries.filter((entry) => entry.type === "intercom_misroute_dropped");
+      const sample = dropped[dropped.length - 1]!.payload as Record<string, unknown>;
+      assert.equal(sample.reason, "receiver_intercom_session_mismatch");
+      assert.equal(sample.intendedIntercomSessionId, "wrong-intercom-session");
+      assert.equal(sample.actualIntercomSessionId, runtimeClient.sessionId);
+    } finally {
+      IntercomClient.prototype.connect = originalConnect;
+      await receiver.emit("session_shutdown", ctx);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("dropped misroute diagnostics are structured and bounded", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+
+    const createdClients: IntercomClient[] = [];
+    const originalConnect = IntercomClient.prototype.connect;
+    IntercomClient.prototype.connect = async function capturedConnect(this: IntercomClient, session) {
+      createdClients.push(this);
+      return originalConnect.call(this, session);
+    };
+
+    const receiver = await createIntercomHarness("runtime-host");
+    const ctx = createContext("pi-session-a", { idle: true, cwd: "/repo/a", hasUI: true });
+
+    const from: SessionInfo = {
+      id: "sender-session",
+      piSessionId: "pi-sender",
+      namespace: "test-namespace",
+      alias: "sender",
+      cwd: "/repo/sender",
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      leaseTtlMs: 30_000,
+      heartbeatIntervalMs: 10_000,
       status: "idle",
     };
 

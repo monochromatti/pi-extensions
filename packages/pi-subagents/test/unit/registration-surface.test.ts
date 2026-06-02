@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import registerSubagentExtension from "../../src/extension/index.ts";
+import {
+	INTERCOM_HEARTBEAT_INTERVAL_MS,
+	INTERCOM_LEASE_TTL_MS,
+	buildIntercomRegistration,
+} from "../../src/intercom-public/types.ts";
 
 const CHILD_ENV_KEYS = [
 	"PI_SUBAGENT_CHILD",
@@ -80,7 +85,31 @@ function toolNames(tools: Array<{ name: string }>): string[] {
 	return tools.map((tool) => tool.name).sort();
 }
 
-test("10.7 normal session registers exactly public tools and no commands or shortcuts", () => {
+test("registration surface exposes identity, namespace, and lease timing", () => {
+	const registration = buildIntercomRegistration({
+		piSessionId: "pi-session-123",
+		alias: "subagent-chat-123",
+		namespace: "workspace-abc",
+		cwd: "/repo/workspace",
+		model: "test-model",
+		pid: 4242,
+		startedAt: 1000,
+		lastActivity: 1200,
+		status: "idle",
+	});
+
+	assert.equal(registration.piSessionId, "pi-session-123");
+	assert.equal(registration.alias, "subagent-chat-123");
+	assert.equal(registration.alias, "subagent-chat-123");
+	assert.equal(registration.namespace, "workspace-abc");
+	assert.equal(registration.cwd, "/repo/workspace");
+	assert.equal(registration.pid, 4242);
+	assert.equal(registration.startedAt, 1000);
+	assert.equal(registration.leaseTtlMs, INTERCOM_LEASE_TTL_MS);
+	assert.equal(registration.heartbeatIntervalMs, INTERCOM_HEARTBEAT_INTERVAL_MS);
+});
+
+test("normal session registers exactly public tools and no commands or shortcuts", () => {
 	withEnv({}, () => {
 		const fake = createFakePi();
 		registerSubagentExtension(fake.pi);
@@ -92,7 +121,7 @@ test("10.7 normal session registers exactly public tools and no commands or shor
 	});
 });
 
-test("8.3 child subagent session registers contact_supervisor", () => {
+test("child subagent session registers contact_supervisor", () => {
 	withEnv({
 		PI_SUBAGENT_CHILD: "1",
 		PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-session",
@@ -113,7 +142,7 @@ test("8.3 child subagent session registers contact_supervisor", () => {
 	});
 });
 
-test("8.4 child subagent session with partial PI_SUBAGENT_SUPERVISOR_* metadata fails safe and does not register contact_supervisor", () => {
+test("child subagent session with partial PI_SUBAGENT_SUPERVISOR_* metadata fails safe and does not register contact_supervisor", () => {
 	withEnv({
 		PI_SUBAGENT_CHILD: "1",
 		PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-session",
@@ -131,23 +160,23 @@ test("8.4 child subagent session with partial PI_SUBAGENT_SUPERVISOR_* metadata 
 	});
 });
 
-test("8.4 legacy-only child env still registers contact_supervisor", () => {
+test("env-only child metadata fails closed and does not register contact_supervisor", () => {
 	withEnv({
 		PI_SUBAGENT_CHILD: "1",
 		PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-session",
 		PI_SUBAGENT_ORCHESTRATOR_CWD: "/repo/parent",
-		PI_SUBAGENT_RUN_ID: "run-legacy",
+		PI_SUBAGENT_RUN_ID: "run-env-only",
 		PI_SUBAGENT_CHILD_AGENT: "worker",
 		PI_SUBAGENT_CHILD_INDEX: "1",
 	}, () => {
 		const fake = createFakePi();
 		registerSubagentExtension(fake.pi);
 
-		assert.deepEqual(toolNames(fake.tools), ["contact_supervisor", "intercom"]);
+		assert.deepEqual(toolNames(fake.tools), ["intercom"]);
 	});
 });
 
-test("7.3 intercom public action schema exposes supported actions", () => {
+test("intercom public action schema exposes supported actions", () => {
 	withEnv({}, () => {
 		const fake = createFakePi();
 		registerSubagentExtension(fake.pi);
@@ -157,7 +186,7 @@ test("7.3 intercom public action schema exposes supported actions", () => {
 	});
 });
 
-test("8.3 contact_supervisor reason schema exposes child-only reasons", () => {
+test("contact_supervisor reason schema exposes child-only reasons", () => {
 	withEnv({
 		PI_SUBAGENT_CHILD: "1",
 		PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-session",
@@ -177,7 +206,7 @@ test("8.3 contact_supervisor reason schema exposes child-only reasons", () => {
 	});
 });
 
-test("7.1 registration still loads after shared module split", async () => {
+test("registration still loads after shared module split", async () => {
 	const [types, depth, tempPaths, output, statusStore, messages, errorDetection, toolPreview] = await Promise.all([
 		import("../../src/shared/types.ts"),
 		import("../../src/shared/depth.ts"),

@@ -6,12 +6,8 @@ export interface IntercomContext {
   receivedAt: number;
 }
 
-function matchesPendingSender(context: IntercomContext, to: string): boolean {
-  if (context.from.id === to) {
-    return true;
-  }
-
-  return context.from.name?.toLowerCase() === to.toLowerCase();
+function contextLabel(context: IntercomContext): string {
+  return `${context.message.id} from ${context.from.alias ?? context.from.id} (${context.from.id})`;
 }
 
 export class ReplyTracker {
@@ -48,8 +44,15 @@ export class ReplyTracker {
     this.currentTurnContext = null;
   }
 
-  resolveReplyTarget(options: { to?: string }, now = Date.now()): IntercomContext {
+  resolveReplyTarget(options: { replyTo?: string }, now = Date.now()): IntercomContext {
     this.pruneExpired(now);
+
+    if (options.replyTo) {
+      const match = this.pendingAsks.get(options.replyTo);
+      if (match) return match;
+      if (this.currentTurnContext?.message.id === options.replyTo) return this.currentTurnContext;
+      throw new Error(`No pending ask with replyTo ${options.replyTo}`);
+    }
 
     if (this.currentTurnContext) {
       return this.currentTurnContext;
@@ -60,24 +63,11 @@ export class ReplyTracker {
       return pending[0]!;
     }
 
-    if (options.to) {
-      const matches = pending.filter((context) => matchesPendingSender(context, options.to!));
-      if (matches.length === 1) {
-        return matches[0]!;
-      }
-      if (matches.length > 1) {
-        throw new Error(`Multiple pending asks from \"${options.to}\" — use the sender session ID instead.`);
-      }
-      if (pending.length > 1) {
-        throw new Error(`No pending ask from \"${options.to}\"`);
-      }
-    }
-
     if (pending.length === 0) {
       throw new Error("No active intercom context to reply to");
     }
 
-    throw new Error("Multiple pending asks — specify `to`");
+    throw new Error(`Multiple pending asks — specify replyTo. Candidates: ${pending.map(contextLabel).join(", ")}`);
   }
 
   markReplied(replyTo: string): void {

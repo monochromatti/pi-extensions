@@ -18,6 +18,7 @@ interface SendOptions {
   replyTo?: string;
   expectsReply?: boolean;
   messageId?: string;
+  origin?: "manual" | "machine";
 }
 
 interface SendResult {
@@ -75,6 +76,12 @@ function isMessage(value: unknown): value is Message {
       return false;
     }
     if (to.alias !== undefined && typeof to.alias !== "string") {
+      return false;
+    }
+    if (to.namespace !== undefined && typeof to.namespace !== "string") {
+      return false;
+    }
+    if (to.global !== undefined && typeof to.global !== "boolean") {
       return false;
     }
   }
@@ -149,21 +156,21 @@ function isSessionInfo(value: unknown): value is SessionInfo {
     return false;
   }
 
-  if (session.name !== undefined && typeof session.name !== "string") {
+  if (typeof session.alias !== "string" || session.alias.trim() === "") {
     return false;
   }
 
-  if (session.namespace !== undefined && typeof session.namespace !== "string") {
+  if (typeof session.namespace !== "string" || session.namespace.trim() === "") {
     return false;
   }
 
-  if (session.piSessionId !== undefined && typeof session.piSessionId !== "string") {
+  if (typeof session.piSessionId !== "string" || session.piSessionId.trim() === "") {
     return false;
   }
-  if (session.protocolVersion !== undefined && typeof session.protocolVersion !== "number") {
+  if (typeof session.leaseTtlMs !== "number" || !Number.isFinite(session.leaseTtlMs) || session.leaseTtlMs < 0) {
     return false;
   }
-  if (session.capabilities !== undefined && (!Array.isArray(session.capabilities) || !session.capabilities.every(capability => typeof capability === "string"))) {
+  if (typeof session.heartbeatIntervalMs !== "number" || !Number.isFinite(session.heartbeatIntervalMs) || session.heartbeatIntervalMs < 0) {
     return false;
   }
   if (session.readiness !== undefined && !isSessionReadiness(session.readiness)) {
@@ -583,13 +590,30 @@ export class IntercomClient extends EventEmitter {
       this.pendingSends.set(messageId, { resolve: wrappedResolve, reject: wrappedReject });
 
       try {
-        writeMessage(socket, { type: "send", to, message });
+        writeMessage(socket, {
+          type: "send",
+          to,
+          message,
+          ...(options.origin !== undefined ? { origin: options.origin } : {}),
+          ...((options as { from?: unknown }).from !== undefined ? { from: (options as { from?: unknown }).from } : {}),
+        });
       } catch (error) {
         clearTimeout(timeout);
         this.pendingSends.delete(messageId);
         reject(toError(error));
       }
     });
+  }
+
+  heartbeat(): void {
+    if (this.disconnecting) {
+      return;
+    }
+    const socket = this.socket;
+    if (!socket || !this._sessionId || socket.destroyed || socket.writableEnded || !socket.writable) {
+      return;
+    }
+    writeMessage(socket, { type: "heartbeat" });
   }
 
   updatePresence(updates: {

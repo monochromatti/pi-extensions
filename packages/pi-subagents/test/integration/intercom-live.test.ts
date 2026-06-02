@@ -232,21 +232,25 @@ function parseStatusSessionId(result: CapturedToolResult): string {
 	return match[1]!.trim();
 }
 
-async function connectLegacyClient(name: string): Promise<IntercomClient> {
+async function connectRegisteredClient(alias: string): Promise<IntercomClient> {
 	const client = new IntercomClient();
 	await client.connect({
-		name,
-		cwd: `/tmp/${name}`,
-		model: "legacy-model",
+		alias,
+		piSessionId: `pi-${alias}`,
+		namespace: "test-namespace",
+		cwd: `/tmp/${alias}`,
+		model: "test-model",
 		pid: process.pid,
 		startedAt: Date.now(),
 		lastActivity: Date.now(),
+		leaseTtlMs: 30_000,
+		heartbeatIntervalMs: 10_000,
 		status: "idle",
 	});
 	return client;
 }
 
-test("7.5/7.6 intercom send delivers message and records pending inbound ask", { concurrency: false }, async () => {
+test("intercom send delivers message and records pending inbound ask", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const sender = await createHarness("sender");
 		const receiver = await createHarness("receiver");
@@ -275,7 +279,7 @@ test("7.5/7.6 intercom send delivers message and records pending inbound ask", {
 	});
 });
 
-test("7.7/7.8 intercom ask waits for reply tool response", { concurrency: false }, async () => {
+test("intercom ask waits for reply tool response", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const asker = await createHarness("asker");
 		const answerer = await createHarness("answerer");
@@ -305,7 +309,7 @@ test("7.7/7.8 intercom ask waits for reply tool response", { concurrency: false 
 	});
 });
 
-test("7.11/7.12 intercom ask waits for late target registration before failing", { concurrency: false }, async () => {
+test("intercom ask waits for late target registration before failing", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const asker = await createHarness("late-asker");
 		let answerer: Awaited<ReturnType<typeof createHarness>> | null = null;
@@ -338,7 +342,7 @@ test("7.11/7.12 intercom ask waits for late target registration before failing",
 	});
 });
 
-test("7.13/7.14 intercom ask honors waitForReadyMs override when set to zero", { concurrency: false }, async () => {
+test("intercom ask honors waitForReadyMs override when set to zero", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const asker = await createHarness("zero-wait-asker");
 		let answerer: Awaited<ReturnType<typeof createHarness>> | null = null;
@@ -364,7 +368,7 @@ test("7.13/7.14 intercom ask honors waitForReadyMs override when set to zero", {
 	});
 });
 
-test("7.15/7.16 intercom reply re-resolves sender via piSessionId after sender reconnect", { concurrency: false }, async () => {
+test("intercom reply re-resolves sender via piSessionId after sender reconnect", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const askerA = await createHarness("sticky-asker", { sessionIdPrefix: "sticky", stableSessionId: true });
 		const answerer = await createHarness("sticky-answerer");
@@ -401,7 +405,7 @@ test("7.15/7.16 intercom reply re-resolves sender via piSessionId after sender r
 	});
 });
 
-test("6.1/6.2 manual ask/reply/pending remains stable for protocol v2 sessions", { concurrency: false }, async () => {
+test("manual ask/reply/pending remains stable", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const asker = await createHarness("manual-asker");
 		const answerer = await createHarness("manual-answerer");
@@ -439,7 +443,7 @@ test("6.1/6.2 manual ask/reply/pending remains stable for protocol v2 sessions",
 	});
 });
 
-test("6.3/6.4 list/status keep protocol fields in details without cluttering text", { concurrency: false }, async () => {
+test("list/status expose identity details without cluttering text", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const alpha = await createHarness("list-alpha");
 		const beta = await createHarness("list-beta");
@@ -449,20 +453,13 @@ test("6.3/6.4 list/status keep protocol fields in details without cluttering tex
 
 			const list = await alpha.tool("intercom").execute("list", { action: "list" }, new AbortController().signal, undefined, alpha.ctx);
 			assert.equal(list.isError, false);
-			assert.doesNotMatch(text(list), /protocolVersion|capabilities|piSessionId-routing/);
-			const listDetails = list.details as { currentSession?: { protocolVersion?: number; capabilities?: string[]; piSessionId?: string }; otherSessions?: Array<{ protocolVersion?: number; capabilities?: string[]; piSessionId?: string }> } | undefined;
-			assert.equal(listDetails?.currentSession?.protocolVersion, 2);
-			assert.ok(Array.isArray(listDetails?.currentSession?.capabilities));
+			const listDetails = list.details as { currentSession?: { piSessionId?: string }; otherSessions?: Array<{ piSessionId?: string }> } | undefined;
 			assert.ok(typeof listDetails?.currentSession?.piSessionId === "string" && listDetails.currentSession.piSessionId.length > 0);
-			assert.equal(listDetails?.otherSessions?.[0]?.protocolVersion, 2);
-			assert.ok(Array.isArray(listDetails?.otherSessions?.[0]?.capabilities));
+			assert.ok(typeof listDetails?.otherSessions?.[0]?.piSessionId === "string" && listDetails.otherSessions[0].piSessionId.length > 0);
 
 			const status = await alpha.tool("intercom").execute("status", { action: "status" }, new AbortController().signal, undefined, alpha.ctx);
 			assert.equal(status.isError, false);
-			assert.doesNotMatch(text(status), /protocolVersion|capabilities|piSessionId-routing/);
-			const statusDetails = status.details as { session?: { protocolVersion?: number; capabilities?: string[]; piSessionId?: string } } | undefined;
-			assert.equal(statusDetails?.session?.protocolVersion, 2);
-			assert.ok(Array.isArray(statusDetails?.session?.capabilities));
+			const statusDetails = status.details as { session?: { piSessionId?: string } } | undefined;
 			assert.ok(typeof statusDetails?.session?.piSessionId === "string" && statusDetails.session.piSessionId.length > 0);
 		} finally {
 			await alpha.shutdown();
@@ -471,34 +468,7 @@ test("6.3/6.4 list/status keep protocol fields in details without cluttering tex
 	});
 });
 
-test("6.5 manual intercom soft-degrades for legacy peers without protocol v2 capability", { concurrency: false }, async () => {
-	await withBroker(async () => {
-		const modern = await createHarness("manual-modern");
-		const legacy = await connectLegacyClient("manual-legacy");
-		const legacyReceived: string[] = [];
-		const onMessage = (_from: unknown, message: { content: { text: string } }) => legacyReceived.push(message.content.text);
-		legacy.on("message", onMessage);
-		try {
-			await modern.start();
-			const list = await modern.tool("intercom").execute("list", { action: "list" }, new AbortController().signal, undefined, modern.ctx);
-			assert.match(text(list), /manual-legacy/);
-
-			const sent = await modern.tool("intercom").execute("send", {
-				action: "send",
-				to: "manual-legacy",
-				message: "manual-soft-degrade-ok",
-			}, new AbortController().signal, undefined, modern.ctx);
-			assert.equal(sent.isError, false, text(sent));
-			await waitUntil(() => legacyReceived.some((value) => value.includes("manual-soft-degrade-ok")), "legacy peer did not receive manual message");
-		} finally {
-			legacy.off("message", onMessage);
-			await modern.shutdown();
-			await legacy.disconnect().catch(() => undefined);
-		}
-	});
-});
-
-test("7.9/7.10 intercom ask reply includes attachment formatting", { concurrency: false }, async () => {
+test("intercom ask reply includes attachment formatting", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const asker = await createHarness("attachment-asker");
 		const answerer = await createHarness("attachment-answerer");
@@ -533,7 +503,7 @@ test("7.9/7.10 intercom ask reply includes attachment formatting", { concurrency
 	});
 });
 
-test("8.5/8.6 contact_supervisor progress_update sends non-blocking update to parent", { concurrency: false }, async () => {
+test("contact_supervisor progress_update sends non-blocking update to parent", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const parent = await createHarness("parent-supervisor");
 		try {
@@ -542,7 +512,7 @@ test("8.5/8.6 contact_supervisor progress_update sends non-blocking update to pa
 				PI_SUBAGENT_CHILD: "1",
 				PI_SUBAGENT_ORCHESTRATOR_TARGET: "parent-supervisor",
 				PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: "parent-supervisor",
-				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: "parent-supervisor",
+				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: parent.ctx.sessionManager.getSessionId(),
 				PI_SUBAGENT_SUPERVISOR_ALIAS: "parent-supervisor",
 				PI_SUBAGENT_SUPERVISOR_CWD: "/repo/parent",
 				PI_SUBAGENT_RUN_ID: "run-progress",
@@ -570,7 +540,7 @@ test("8.5/8.6 contact_supervisor progress_update sends non-blocking update to pa
 	});
 });
 
-test("4.7/4.8 contact_supervisor sends structured target envelope and routes by intercomSessionId", { concurrency: false }, async () => {
+test("contact_supervisor sends structured target envelope and routes by intercomSessionId", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const parentA = await createHarness("duplicate-supervisor", { sessionIdPrefix: "parent-a" });
 		const parentB = await createHarness("duplicate-supervisor", { sessionIdPrefix: "parent-b" });
@@ -620,14 +590,14 @@ test("4.7/4.8 contact_supervisor sends structured target envelope and routes by 
 	});
 });
 
-test("4.9/4.10 contact_supervisor falls back to piSessionId when supervisor intercomSessionId is stale", { concurrency: false }, async () => {
+test("contact_supervisor re-resolves by piSessionId when supervisor intercomSessionId is stale", { concurrency: false }, async () => {
 	await withBroker(async () => {
-		const parent = await createHarness("fallback-parent", { sessionIdPrefix: "fallback-parent", stableSessionId: true });
+		const parent = await createHarness("reconnect-parent", { sessionIdPrefix: "reconnect-parent", stableSessionId: true });
 		try {
 			await parent.start();
 			const oldStatus = await parent.tool("intercom").execute("status-old", { action: "status" }, new AbortController().signal, undefined, parent.ctx);
 			const staleIntercomSessionId = parseStatusSessionId(oldStatus);
-			const stablePiSessionId = "fallback-parent-session-0";
+			const stablePiSessionId = "reconnect-parent-session-0";
 
 			await parent.shutdown();
 			await parent.start();
@@ -637,24 +607,24 @@ test("4.9/4.10 contact_supervisor falls back to piSessionId when supervisor inte
 
 			await withChildEnv({
 				PI_SUBAGENT_CHILD: "1",
-				PI_SUBAGENT_ORCHESTRATOR_TARGET: "fallback-parent",
+				PI_SUBAGENT_ORCHESTRATOR_TARGET: "reconnect-parent",
 				PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: staleIntercomSessionId,
 				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: stablePiSessionId,
-				PI_SUBAGENT_SUPERVISOR_ALIAS: "fallback-parent",
-				PI_SUBAGENT_SUPERVISOR_CWD: "/repo/fallback-parent",
-				PI_SUBAGENT_RUN_ID: "run-fallback",
+				PI_SUBAGENT_SUPERVISOR_ALIAS: "reconnect-parent",
+				PI_SUBAGENT_SUPERVISOR_CWD: "/repo/reconnect-parent",
+				PI_SUBAGENT_RUN_ID: "run-reconnect",
 				PI_SUBAGENT_CHILD_AGENT: "worker",
 				PI_SUBAGENT_CHILD_INDEX: "0",
 			}, async () => {
-				const child = await createHarness("child-fallback", { sessionIdPrefix: "child-fallback" });
+				const child = await createHarness("child-reconnect", { sessionIdPrefix: "child-reconnect" });
 				try {
 					await child.start();
 					const result = await child.tool("contact_supervisor").execute("contact", {
 						reason: "progress_update",
-						message: "UPDATE: stale-id fallback",
+						message: "UPDATE: stale-id re-resolution",
 					}, new AbortController().signal, undefined, child.ctx);
 					assert.equal(result.isError, false, text(result));
-					await waitUntil(() => parent.sentMessages.some((entry) => entry.message.content?.includes("UPDATE: stale-id fallback")), "parent did not receive stale-id fallback update");
+					await waitUntil(() => parent.sentMessages.some((entry) => entry.message.content?.includes("UPDATE: stale-id re-resolution")), "parent did not receive stale-id re-resolution update");
 				} finally {
 					await child.shutdown();
 				}
@@ -665,50 +635,28 @@ test("4.9/4.10 contact_supervisor falls back to piSessionId when supervisor inte
 	});
 });
 
-test("4.11/4.12 contact_supervisor legacy env uses alias-only routing and still delivers", { concurrency: false }, async () => {
+test("contact_supervisor env-only metadata fails closed without exact identity", { concurrency: false }, async () => {
 	await withBroker(async () => {
-		const parent = await createHarness("legacy-parent");
-		try {
-			await parent.start();
-			await withChildEnv({
-				PI_SUBAGENT_CHILD: "1",
-				PI_SUBAGENT_ORCHESTRATOR_TARGET: "legacy-parent",
-				PI_SUBAGENT_ORCHESTRATOR_CWD: "/repo/legacy-parent",
-				PI_SUBAGENT_RUN_ID: "run-legacy-only",
-				PI_SUBAGENT_CHILD_AGENT: "worker",
-				PI_SUBAGENT_CHILD_INDEX: "0",
-			}, async () => {
-				const child = await createHarness("legacy-child", { sessionIdPrefix: "legacy-child" });
-				try {
-					await child.start();
-					assert.ok(child.runner.getToolDefinition("contact_supervisor"), "runner should register child supervisor tool for legacy env");
-					const result = await child.tool("contact_supervisor").execute("contact", {
-						reason: "progress_update",
-						message: "UPDATE: legacy-alias-only",
-					}, new AbortController().signal, undefined, child.ctx);
-					assert.equal(result.isError, false, text(result));
-					await waitUntil(() => parent.sentMessages.some((entry) => entry.message.content?.includes("UPDATE: legacy-alias-only")), "parent did not receive legacy alias update");
-					const sentEntry = child.entries.find((entry) => {
-						if (entry.type !== "intercom_sent") return false;
-						const data = entry.data as { message?: { text?: string } };
-						return data.message?.text === "UPDATE: legacy-alias-only";
-					});
-					assert.ok(sentEntry, "legacy send should append intercom_sent entry");
-					const sentData = sentEntry!.data as { target?: Record<string, unknown> };
-					assert.deepEqual(sentData.target, { alias: "legacy-parent" });
-					assert.equal(Object.prototype.hasOwnProperty.call(sentData.target ?? {}, "intercomSessionId"), false);
-					assert.equal(Object.prototype.hasOwnProperty.call(sentData.target ?? {}, "piSessionId"), false);
-				} finally {
-					await child.shutdown();
-				}
-			});
-		} finally {
-			await parent.shutdown();
-		}
+		await withChildEnv({
+			PI_SUBAGENT_CHILD: "1",
+			PI_SUBAGENT_ORCHESTRATOR_TARGET: "env-parent",
+			PI_SUBAGENT_ORCHESTRATOR_CWD: "/repo/env-parent",
+			PI_SUBAGENT_RUN_ID: "run-env-only",
+			PI_SUBAGENT_CHILD_AGENT: "worker",
+			PI_SUBAGENT_CHILD_INDEX: "0",
+		}, async () => {
+			const child = await createHarness("env-child", { sessionIdPrefix: "env-child" });
+			try {
+				await child.start();
+				assert.equal(child.runner.getToolDefinition("contact_supervisor"), undefined);
+			} finally {
+				await child.shutdown();
+			}
+		});
 	});
 });
 
-test("8.7/8.8 contact_supervisor need_decision waits for parent reply", { concurrency: false }, async () => {
+test("contact_supervisor need_decision waits for parent reply", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const parent = await createHarness("decision-parent");
 		try {
@@ -717,7 +665,7 @@ test("8.7/8.8 contact_supervisor need_decision waits for parent reply", { concur
 				PI_SUBAGENT_CHILD: "1",
 				PI_SUBAGENT_ORCHESTRATOR_TARGET: "decision-parent",
 				PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: "decision-parent",
-				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: "decision-parent",
+				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: parent.ctx.sessionManager.getSessionId(),
 				PI_SUBAGENT_SUPERVISOR_ALIAS: "decision-parent",
 				PI_SUBAGENT_SUPERVISOR_CWD: "/repo/decision",
 				PI_SUBAGENT_RUN_ID: "run-decision",
@@ -751,7 +699,7 @@ test("8.7/8.8 contact_supervisor need_decision waits for parent reply", { concur
 	});
 });
 
-test("8.9/8.10 contact_supervisor interview_request returns structured responses", { concurrency: false }, async () => {
+test("contact_supervisor interview_request returns structured responses", { concurrency: false }, async () => {
 	await withBroker(async () => {
 		const parent = await createHarness("interview-parent");
 		try {
@@ -760,7 +708,7 @@ test("8.9/8.10 contact_supervisor interview_request returns structured responses
 				PI_SUBAGENT_CHILD: "1",
 				PI_SUBAGENT_ORCHESTRATOR_TARGET: "interview-parent",
 				PI_SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID: "interview-parent",
-				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: "interview-parent",
+				PI_SUBAGENT_SUPERVISOR_PI_SESSION_ID: parent.ctx.sessionManager.getSessionId(),
 				PI_SUBAGENT_SUPERVISOR_ALIAS: "interview-parent",
 				PI_SUBAGENT_SUPERVISOR_CWD: "/repo/interview",
 				PI_SUBAGENT_RUN_ID: "run-interview",

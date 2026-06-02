@@ -2,11 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
+import net from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { IntercomClient } from "../../src/intercom-public/broker/client.ts";
-import type { Message, SendTargetEnvelope } from "../../src/intercom-public/types.ts";
+import { createMessageReader, writeMessage } from "../../src/intercom-public/broker/framing.ts";
+import { getBrokerSocketPath } from "../../src/intercom-public/broker/paths.ts";
+import { type Message, type SendTargetEnvelope } from "../../src/intercom-public/types.ts";
 
 const packageDir = process.cwd().endsWith(path.join("packages", "pi-subagents"))
   ? process.cwd()
@@ -79,10 +82,11 @@ async function withBroker<T>(fn: (homeDir: string) => Promise<T>): Promise<T> {
 }
 
 async function connectClient(homeDir: string, session: {
-  name: string;
+  alias: string;
   piSessionId: string;
   namespace?: string;
   cwd?: string;
+  leaseTtlMs?: number;
 }): Promise<IntercomClient> {
   const previousHome = process.env.HOME;
   const previousUserProfile = process.env.USERPROFILE;
@@ -92,16 +96,16 @@ async function connectClient(homeDir: string, session: {
   const client = new IntercomClient();
   try {
     await client.connect({
-      name: session.name,
+      alias: session.alias,
       piSessionId: session.piSessionId,
-      protocolVersion: 2,
-      capabilities: ["piSessionId-routing"],
-      namespace: session.namespace,
-      cwd: session.cwd ?? `/tmp/${session.name}`,
+      namespace: session.namespace ?? "test-namespace",
+      cwd: session.cwd ?? `/tmp/${session.alias}`,
       model: "test-model",
       pid: process.pid,
       startedAt: Date.now(),
       lastActivity: Date.now(),
+      leaseTtlMs: session.leaseTtlMs ?? 30_000,
+      heartbeatIntervalMs: 10_000,
       status: "idle",
     });
   } finally {
@@ -111,6 +115,23 @@ async function connectClient(homeDir: string, session: {
     else process.env.USERPROFILE = previousUserProfile;
   }
 
+  return client;
+}
+
+async function connectRawClient(homeDir: string, session: Record<string, unknown>): Promise<IntercomClient> {
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  process.env.HOME = homeDir;
+  process.env.USERPROFILE = homeDir;
+  const client = new IntercomClient();
+  try {
+    await client.connect(session as never);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+  }
   return client;
 }
 
@@ -149,11 +170,11 @@ async function waitForReceivedMessage(messages: Message[], expectedText: string)
   throw new Error(`Timed out waiting for message: ${expectedText}`);
 }
 
-test("1.1/1.2 broker routes duplicate names by exact intercomSessionId", { concurrency: false }, async () => {
+test("broker routes duplicate aliases by exact intercomSessionId", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
-    const targetA = await connectClient(homeDir, { name: "dup", piSessionId: "pi-a", cwd: "/work/a" });
-    const targetB = await connectClient(homeDir, { name: "dup", piSessionId: "pi-b", cwd: "/work/b" });
-    const sender = await connectClient(homeDir, { name: "sender", piSessionId: "pi-sender", cwd: "/work/sender" });
+    const targetA = await connectClient(homeDir, { alias: "dup", piSessionId: "pi-a", cwd: "/work/a" });
+    const targetB = await connectClient(homeDir, { alias: "dup", piSessionId: "pi-b", cwd: "/work/b" });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", cwd: "/work/sender" });
     const inboxA = createInbox(targetA);
     const inboxB = createInbox(targetB);
 
@@ -183,10 +204,10 @@ test("1.1/1.2 broker routes duplicate names by exact intercomSessionId", { concu
   });
 });
 
-test("1.3/1.4 broker structured target falls back from stale intercomSessionId to piSessionId", { concurrency: false }, async () => {
+test("broker structured target re-resolves stale intercomSessionId by piSessionId", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
-    const target = await connectClient(homeDir, { name: "supervisor", piSessionId: "pi-parent", cwd: "/work/parent" });
-    const sender = await connectClient(homeDir, { name: "child", piSessionId: "pi-child", cwd: "/work/child" });
+    const target = await connectClient(homeDir, { alias: "supervisor", piSessionId: "pi-parent", cwd: "/work/parent" });
+    const sender = await connectClient(homeDir, { alias: "child", piSessionId: "pi-child", cwd: "/work/child" });
     const inbox = createInbox(target);
 
     try {
@@ -195,12 +216,12 @@ test("1.3/1.4 broker structured target falls back from stale intercomSessionId t
         piSessionId: "pi-parent",
         alias: "supervisor",
       }, {
-        text: "fallback-by-pi-session-id",
+        text: "reresolved-by-pi-session-id",
       });
 
       assert.equal(result.delivered, true);
-      const received = await waitForReceivedMessage(inbox.messages, "fallback-by-pi-session-id");
-      assert.equal(received.content.text, "fallback-by-pi-session-id");
+      const received = await waitForReceivedMessage(inbox.messages, "reresolved-by-pi-session-id");
+      assert.equal(received.content.text, "reresolved-by-pi-session-id");
     } finally {
       inbox.dispose();
       await disconnectAll([sender, target]);
@@ -208,10 +229,10 @@ test("1.3/1.4 broker structured target falls back from stale intercomSessionId t
   });
 });
 
-test("3.1/3.2 structured sends include resolved receiver metadata; manual sends still deliver without requiring metadata", { concurrency: false }, async () => {
+test("structured sends include resolved receiver metadata; manual sends still deliver without requiring metadata", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
-    const target = await connectClient(homeDir, { name: "receiver", piSessionId: "pi-receiver", cwd: "/work/receiver" });
-    const sender = await connectClient(homeDir, { name: "sender", piSessionId: "pi-sender", cwd: "/work/sender" });
+    const target = await connectClient(homeDir, { alias: "receiver", piSessionId: "pi-receiver", cwd: "/work/receiver" });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", cwd: "/work/sender" });
     const inbox = createInbox(target);
 
     try {
@@ -241,11 +262,11 @@ test("3.1/3.2 structured sends include resolved receiver metadata; manual sends 
   });
 });
 
-test("1.5/1.6 duplicate manual names return deterministic candidate error", { concurrency: false }, async () => {
+test("duplicate manual aliases return deterministic candidate error", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
-    const targetA = await connectClient(homeDir, { name: "worker", piSessionId: "pi-worker-a", cwd: "/repo/a" });
-    const targetB = await connectClient(homeDir, { name: "worker", piSessionId: "pi-worker-b", cwd: "/repo/b" });
-    const sender = await connectClient(homeDir, { name: "sender", piSessionId: "pi-sender" });
+    const targetA = await connectClient(homeDir, { alias: "worker", piSessionId: "pi-worker-a", cwd: "/repo/a" });
+    const targetB = await connectClient(homeDir, { alias: "worker", piSessionId: "pi-worker-b", cwd: "/repo/b" });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender" });
     const inboxA = createInbox(targetA);
     const inboxB = createInbox(targetB);
 
@@ -263,21 +284,21 @@ test("1.5/1.6 duplicate manual names return deterministic candidate error", { co
   });
 });
 
-test("1.7/1.8 namespace constrains alias lookup, exact IDs ignore namespace", { concurrency: false }, async () => {
+test("namespace constrains alias lookup, exact IDs ignore namespace", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const targetA = await connectClient(homeDir, {
-      name: "dupe",
+      alias: "dupe",
       piSessionId: "pi-a",
       namespace: "team-a",
       cwd: "/repo/team-a",
     });
     const targetB = await connectClient(homeDir, {
-      name: "dupe",
+      alias: "dupe",
       piSessionId: "pi-b",
       namespace: "team-b",
       cwd: "/repo/team-b",
     });
-    const sender = await connectClient(homeDir, { name: "sender", piSessionId: "pi-sender" });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender" });
     const inboxA = createInbox(targetA);
     const inboxB = createInbox(targetB);
 
@@ -307,11 +328,11 @@ test("1.7/1.8 namespace constrains alias lookup, exact IDs ignore namespace", { 
       await waitForReceivedMessage(inboxB.messages, "pi-id-ignores-namespace");
 
       const namespaceMiss: SendTargetEnvelope = { alias: "dupe", namespace: "missing-team" };
-      const miss = await sender.send(namespaceMiss, { text: "must-not-global-fallback" });
+      const miss = await sender.send(namespaceMiss, { text: "must-not-cross-namespace" });
       assert.equal(miss.delivered, false);
       assert.equal(miss.reason, "Session not found");
-      assert.equal(inboxA.messages.some((message) => message.content.text === "must-not-global-fallback"), false);
-      assert.equal(inboxB.messages.some((message) => message.content.text === "must-not-global-fallback"), false);
+      assert.equal(inboxA.messages.some((message) => message.content.text === "must-not-cross-namespace"), false);
+      assert.equal(inboxB.messages.some((message) => message.content.text === "must-not-cross-namespace"), false);
     } finally {
       inboxA.dispose();
       inboxB.dispose();
@@ -320,23 +341,21 @@ test("1.7/1.8 namespace constrains alias lookup, exact IDs ignore namespace", { 
   });
 });
 
-test("1.9/1.10 protocol v2 keeps manual list + unique name send behavior", { concurrency: false }, async () => {
+test("manual list + unique alias send behavior", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
-    const alpha = await connectClient(homeDir, { name: "alpha", piSessionId: "pi-alpha", cwd: "/repo/alpha" });
-    const beta = await connectClient(homeDir, { name: "beta", piSessionId: "pi-beta", cwd: "/repo/beta" });
+    const alpha = await connectClient(homeDir, { alias: "alpha", piSessionId: "pi-alpha", cwd: "/repo/alpha" });
+    const beta = await connectClient(homeDir, { alias: "beta", piSessionId: "pi-beta", cwd: "/repo/beta" });
     const inbox = createInbox(beta);
 
     try {
       const sessions = await alpha.listSessions();
-      const betaInList = sessions.find((session) => session.name === "beta");
+      const betaInList = sessions.find((session) => session.alias === "beta");
       assert.ok(betaInList);
       assert.equal(betaInList.piSessionId, "pi-beta");
-      assert.equal(betaInList.protocolVersion, 2);
-      assert.deepEqual(betaInList.capabilities, ["piSessionId-routing"]);
 
-      const send = await alpha.send("beta", { text: "manual-unique-name-still-works" });
+      const send = await alpha.send("beta", { text: "manual-unique-alias-still-works" });
       assert.equal(send.delivered, true);
-      await waitForReceivedMessage(inbox.messages, "manual-unique-name-still-works");
+      await waitForReceivedMessage(inbox.messages, "manual-unique-alias-still-works");
     } finally {
       inbox.dispose();
       await disconnectAll([alpha, beta]);
@@ -344,7 +363,250 @@ test("1.9/1.10 protocol v2 keeps manual list + unique name send behavior", { con
   });
 });
 
-test("1.11/1.12 session readiness + subagent metadata roundtrip via registration/presence", { concurrency: false }, async () => {
+test("broker rejects client-supplied from identity", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const target = await connectClient(homeDir, { alias: "target", piSessionId: "pi-target", cwd: "/work/target" });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", cwd: "/work/sender" });
+    const inbox = createInbox(target);
+    try {
+      const result = await sender.send({ intercomSessionId: target.sessionId ?? undefined }, {
+        text: "forged-from-must-not-deliver",
+        from: { intercomSessionId: "attacker", piSessionId: "pi-attacker" },
+      } as never);
+      assert.equal(result.delivered, false);
+      assert.equal(result.reason, "forged-from-field");
+      assert.equal(inbox.messages.some((message) => message.content.text === "forged-from-must-not-deliver"), false);
+    } finally {
+      inbox.dispose();
+      await disconnectAll([sender, target]);
+    }
+  });
+});
+
+test("machine messages reject alias-only targets", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const target = await connectClient(homeDir, { alias: "target", piSessionId: "pi-target", cwd: "/work/target" });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", cwd: "/work/sender" });
+    const inbox = createInbox(target);
+    try {
+      const result = await sender.send({ alias: "target", namespace: "/work/target" }, {
+        text: "machine-alias-must-not-deliver",
+        origin: "machine",
+      } as never);
+      assert.equal(result.delivered, false);
+      assert.equal(result.reason, "unsafe-machine-alias-target");
+      assert.equal(inbox.messages.some((message) => message.content.text === "machine-alias-must-not-deliver"), false);
+    } finally {
+      inbox.dispose();
+      await disconnectAll([sender, target]);
+    }
+  });
+});
+
+test("unregistered machine sends fail closed with unregistered-sender", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+    const socket = net.connect(getBrokerSocketPath());
+    try {
+      await once(socket, "connect");
+      const response = new Promise<unknown>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("raw unregistered send timed out")), 5000);
+        socket.on("data", createMessageReader((msg) => {
+          clearTimeout(timeout);
+          resolve(msg);
+        }, reject));
+      });
+      writeMessage(socket, {
+        type: "send",
+        origin: "machine",
+        to: { piSessionId: "pi-target" },
+        message: {
+          id: "unregistered-machine-message",
+          timestamp: Date.now(),
+          content: { text: "must-not-deliver" },
+        },
+      });
+      assert.deepEqual(await response, {
+        type: "delivery_failed",
+        messageId: "unregistered-machine-message",
+        reason: "unregistered-sender",
+      });
+    } finally {
+      socket.destroy();
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("duplicate live piSessionId blocks exact piSessionId resolution", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const targetA = await connectClient(homeDir, { alias: "dup-a", piSessionId: "pi-dup", cwd: "/work/a" });
+    const targetB = await connectClient(homeDir, { alias: "dup-b", piSessionId: "pi-dup", cwd: "/work/b" });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender" });
+    const inboxA = createInbox(targetA);
+    const inboxB = createInbox(targetB);
+    try {
+      const result = await sender.send({ piSessionId: "pi-dup" }, { text: "must-not-pick-duplicate" });
+      assert.equal(result.delivered, false);
+      assert.match(result.reason ?? "", /duplicate-pi-session-conflict/);
+      assert.match(result.reason ?? "", /piSessionId=pi-dup/);
+      assert.match(result.reason ?? "", /cwd=\/work\/a/);
+      assert.match(result.reason ?? "", /cwd=\/work\/b/);
+      assert.equal(inboxA.messages.length, 0);
+      assert.equal(inboxB.messages.length, 0);
+    } finally {
+      inboxA.dispose();
+      inboxB.dispose();
+      await disconnectAll([sender, targetA, targetB]);
+    }
+  });
+});
+
+test("broker owns registration lease start time", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+    const client = new IntercomClient();
+    try {
+      await client.connect({
+        alias: "future-lease",
+        piSessionId: "pi-future-lease",
+        namespace: "team",
+        cwd: "/repo/future",
+        model: "test-model",
+        pid: process.pid,
+        startedAt: Date.now(),
+        lastActivity: Date.now() + 60_000,
+        heartbeatIntervalMs: 10_000,
+        leaseTtlMs: 50,
+        status: "idle",
+      });
+      await wait(80);
+      const sessions = await client.listSessions();
+      assert.equal(sessions.some((session) => session.piSessionId === "pi-future-lease"), false);
+    } finally {
+      await disconnectAll([client]);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("expired sessions are ignored and heartbeat extends lease", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const expiring = await connectClient(homeDir, { alias: "ttl", piSessionId: "pi-ttl", cwd: "/work/ttl", leaseTtlMs: 80 });
+    const keptAlive = await connectClient(homeDir, { alias: "alive", piSessionId: "pi-alive", cwd: "/work/alive", leaseTtlMs: 200 });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender" });
+    const aliveInbox = createInbox(keptAlive);
+    try {
+      await wait(130);
+      const expiredByPi = await sender.send({ piSessionId: "pi-ttl" }, { text: "expired-pi" });
+      assert.equal(expiredByPi.delivered, false);
+      assert.equal(expiredByPi.reason, "Session not found");
+      const expiredByAlias = await sender.send({ alias: "ttl" }, { text: "expired-alias" });
+      assert.equal(expiredByAlias.delivered, false);
+      assert.equal(expiredByAlias.reason, "Session not found");
+      keptAlive.heartbeat();
+      await wait(120);
+      const alive = await sender.send({ piSessionId: "pi-alive" }, { text: "heartbeat-kept-alive" });
+      assert.equal(alive.delivered, true);
+      await waitForReceivedMessage(aliveInbox.messages, "heartbeat-kept-alive");
+    } finally {
+      aliveInbox.dispose();
+      await disconnectAll([sender, keptAlive, expiring]);
+    }
+  });
+});
+
+test("duplicate alias in same namespace returns ambiguity with identity candidates", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const targetA = await connectClient(homeDir, { alias: "same", piSessionId: "pi-a", namespace: "team", cwd: "/repo/a" });
+    const targetB = await connectClient(homeDir, { alias: "same", piSessionId: "pi-b", namespace: "team", cwd: "/repo/b" });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", namespace: "team" });
+    try {
+      const result = await sender.send({ alias: "same" }, { text: "ambiguous-team" });
+      assert.equal(result.delivered, false);
+      assert.match(result.reason ?? "", /ambiguous-target/);
+      assert.match(result.reason ?? "", /piSessionId=pi-a/);
+      assert.match(result.reason ?? "", /piSessionId=pi-b/);
+      assert.match(result.reason ?? "", /namespace=team/);
+      assert.match(result.reason ?? "", /leaseExpiresAt=/);
+    } finally {
+      await disconnectAll([sender, targetA, targetB]);
+    }
+  });
+});
+
+test("alias lookup honors explicit alias when it differs from registered alias", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const target = await connectRawClient(homeDir, {
+      alias: "exact-alias",
+      piSessionId: "pi-alias",
+      namespace: "team",
+      cwd: "/repo/alias",
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      leaseTtlMs: 30_000,
+      heartbeatIntervalMs: 10_000,
+      status: "idle",
+    });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", namespace: "team" });
+    const inbox = createInbox(target);
+    try {
+      const result = await sender.send({ alias: "exact-alias" }, { text: "alias-field-hit" });
+      assert.equal(result.delivered, true);
+      const received = await waitForReceivedMessage(inbox.messages, "alias-field-hit");
+      assert.equal(received.to?.alias, "exact-alias");
+    } finally {
+      inbox.dispose();
+      await disconnectAll([sender, target]);
+    }
+  });
+});
+
+test("alias lookup defaults to sender namespace and explicit global can be ambiguous", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const targetA = await connectClient(homeDir, { alias: "cross", piSessionId: "pi-a", namespace: "team-a", cwd: "/repo/a" });
+    const targetB = await connectClient(homeDir, { alias: "cross", piSessionId: "pi-b", namespace: "team-b", cwd: "/repo/b" });
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", namespace: "team-a" });
+    const inboxA = createInbox(targetA);
+    const inboxB = createInbox(targetB);
+    try {
+      const local = await sender.send({ alias: "cross" }, { text: "namespace-default" });
+      assert.equal(local.delivered, true);
+      await waitForReceivedMessage(inboxA.messages, "namespace-default");
+      assert.equal(inboxB.messages.some((message) => message.content.text === "namespace-default"), false);
+
+      const global = await sender.send({ alias: "cross", global: true }, { text: "global-ambiguous" });
+      assert.equal(global.delivered, false);
+      assert.match(global.reason ?? "", /ambiguous-target/);
+      assert.match(global.reason ?? "", /namespace=team-a/);
+      assert.match(global.reason ?? "", /namespace=team-b/);
+
+      const exact = await sender.send({ intercomSessionId: targetB.sessionId ?? undefined, alias: "cross" }, { text: "exact-global" });
+      assert.equal(exact.delivered, true);
+      await waitForReceivedMessage(inboxB.messages, "exact-global");
+    } finally {
+      inboxA.dispose();
+      inboxB.dispose();
+      await disconnectAll([sender, targetA, targetB]);
+    }
+  });
+});
+
+test("session readiness + subagent metadata roundtrip via registration/presence", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
@@ -355,15 +617,16 @@ test("1.11/1.12 session readiness + subagent metadata roundtrip via registration
     const observer = new IntercomClient();
     try {
       await child.connect({
-        name: "child",
+        alias: "child",
         piSessionId: "pi-child",
-        protocolVersion: 2,
-        capabilities: ["piSessionId-routing"],
+        namespace: "test-namespace",
         cwd: "/repo/child",
         model: "child-model",
         pid: process.pid,
         startedAt: Date.now(),
         lastActivity: Date.now(),
+        leaseTtlMs: 30_000,
+        heartbeatIntervalMs: 10_000,
         status: "idle",
         readiness: { state: "initializing", updatedAt: Date.now() },
         subagent: {
@@ -374,15 +637,16 @@ test("1.11/1.12 session readiness + subagent metadata roundtrip via registration
         },
       });
       await observer.connect({
-        name: "observer",
+        alias: "observer",
         piSessionId: "pi-observer",
-        protocolVersion: 2,
-        capabilities: ["piSessionId-routing"],
+        namespace: "test-namespace",
         cwd: "/repo/observer",
         model: "observer-model",
         pid: process.pid,
         startedAt: Date.now(),
         lastActivity: Date.now(),
+        leaseTtlMs: 30_000,
+        heartbeatIntervalMs: 10_000,
         status: "idle",
       });
     } finally {
@@ -393,7 +657,7 @@ test("1.11/1.12 session readiness + subagent metadata roundtrip via registration
     }
 
     try {
-      const listed = (await observer.listSessions()).find((session) => session.name === "child");
+      const listed = (await observer.listSessions()).find((session) => session.alias === "child");
       assert.ok(listed);
       assert.equal(listed.readiness?.state, "initializing");
       assert.equal(listed.subagent?.ownerPiSessionId, "pi-parent");
@@ -404,7 +668,7 @@ test("1.11/1.12 session readiness + subagent metadata roundtrip via registration
       child.updatePresence({ readiness: { state: "ready", updatedAt: Date.now() } });
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {
-        const refreshed = (await observer.listSessions()).find((session) => session.name === "child");
+        const refreshed = (await observer.listSessions()).find((session) => session.alias === "child");
         if (refreshed?.readiness?.state === "ready") {
           return;
         }
@@ -413,54 +677,6 @@ test("1.11/1.12 session readiness + subagent metadata roundtrip via registration
       assert.fail("Timed out waiting for readiness=ready");
     } finally {
       await disconnectAll([observer, child]);
-    }
-  });
-});
-
-test("1.10 legacy registration receives protocol defaults", { concurrency: false }, async () => {
-  await withBroker(async (homeDir) => {
-    const previousHome = process.env.HOME;
-    const previousUserProfile = process.env.USERPROFILE;
-    process.env.HOME = homeDir;
-    process.env.USERPROFILE = homeDir;
-
-    const legacy = new IntercomClient();
-    const observer = new IntercomClient();
-    try {
-      await legacy.connect({
-        name: "legacy",
-        cwd: "/repo/legacy",
-        model: "old-model",
-        pid: process.pid,
-        startedAt: Date.now(),
-        lastActivity: Date.now(),
-      });
-      await observer.connect({
-        name: "observer",
-        piSessionId: "pi-observer",
-        protocolVersion: 2,
-        capabilities: ["piSessionId-routing"],
-        cwd: "/repo/observer",
-        model: "test-model",
-        pid: process.pid,
-        startedAt: Date.now(),
-        lastActivity: Date.now(),
-      });
-    } finally {
-      if (previousHome === undefined) delete process.env.HOME;
-      else process.env.HOME = previousHome;
-      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
-      else process.env.USERPROFILE = previousUserProfile;
-    }
-
-    try {
-      const legacyInList = (await observer.listSessions()).find((session) => session.name === "legacy");
-      assert.ok(legacyInList);
-      assert.equal(legacyInList.protocolVersion, 1);
-      assert.deepEqual(legacyInList.capabilities, []);
-      assert.equal(legacyInList.piSessionId, `legacy:${legacyInList.id}`);
-    } finally {
-      await disconnectAll([observer, legacy]);
     }
   });
 });

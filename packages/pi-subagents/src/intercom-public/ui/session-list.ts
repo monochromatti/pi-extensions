@@ -34,7 +34,7 @@ function shortSessionId(sessionId: string): string {
 }
 
 function sessionTitle(session: SessionInfo, options?: { self?: boolean; sameCwd?: boolean }): string {
-  const name = session.name || "Unnamed session";
+  const name = session.alias || "Unnamed session";
   const tags = [options?.self ? "self" : undefined, options?.sameCwd ? "same cwd" : undefined]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
