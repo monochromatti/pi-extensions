@@ -12,6 +12,8 @@ export function writeMessage(socket: Socket, msg: unknown): void {
   socket.write(Buffer.concat([header, payload]));
 }
 
+export const DEFAULT_MAX_FRAME_SIZE_BYTES = 4 * 1024 * 1024;
+
 /**
  * Create a message reader that handles partial reads.
  * Calls onMessage for each complete message received.
@@ -20,15 +22,21 @@ export function writeMessage(socket: Socket, msg: unknown): void {
 export function createMessageReader(
   onMessage: (msg: unknown) => void,
   onError: (error: Error) => void,
+  options?: { maxFrameSizeBytes?: number },
 ) {
   let buffer = Buffer.alloc(0);
+  const maxFrameSizeBytes = options?.maxFrameSizeBytes ?? DEFAULT_MAX_FRAME_SIZE_BYTES;
 
   return (data: Buffer) => {
     buffer = Buffer.concat([buffer, data]);
 
     while (buffer.length >= 4) {
       const length = buffer.readUInt32BE(0);
-      
+      if (length > maxFrameSizeBytes) {
+        onError(new Error(`intercom_protocol/frame_too_large:length=${length},max=${maxFrameSizeBytes}`));
+        return;
+      }
+
       if (buffer.length < 4 + length) {
         break;
       }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ReplyTracker } from "../../src/intercom-public/reply-tracker.ts";
-import type { Message, SessionInfo } from "../../src/intercom-public/types.ts";
+import type { DeliveredMessage, SessionInfo } from "../../src/intercom-public/types.ts";
 
 function session(id: string, piSessionId = id): SessionInfo {
   return {
@@ -16,11 +16,12 @@ function session(id: string, piSessionId = id): SessionInfo {
   };
 }
 
-function ask(id: string): Message {
+function ask(id: string): DeliveredMessage {
   return {
     id,
     timestamp: Date.now(),
     expectsReply: true,
+    to: { intercomSessionId: "receiver", piSessionId: "pi-receiver" },
     content: { text: `ask ${id}` },
   };
 }
@@ -53,4 +54,25 @@ test("replied and expired pending asks are pruned", () => {
   tracker.markReplied("ask-a");
   assert.deepEqual(tracker.listPending(105).map((context) => context.message.id), ["ask-b"]);
   assert.deepEqual(tracker.listPending(111).map((context) => context.message.id), []);
+});
+
+test("reply context stores identity snapshot target with reconnect policy", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(session("sender-a", "pi-a"), ask("ask-a"));
+  const resolved = tracker.resolveReplyTarget({ replyTo: "ask-a" });
+
+  assert.deepEqual(resolved.replyTarget, {
+    kind: "identity-snapshot",
+    intercomSessionId: "sender-a",
+    piSessionId: "pi-a",
+    alias: "sender-a",
+    reconnect: "same-pi-session-if-unique",
+  });
+});
+
+test("reply context supports strict same-intercom reconnect policy", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(session("sender-a", "pi-a"), ask("ask-a"), Date.now(), "same-intercom-session");
+  const resolved = tracker.resolveReplyTarget({ replyTo: "ask-a" });
+  assert.equal(resolved.replyTarget.reconnect, "same-intercom-session");
 });

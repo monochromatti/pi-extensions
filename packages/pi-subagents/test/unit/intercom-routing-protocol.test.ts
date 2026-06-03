@@ -9,7 +9,7 @@ import path from "node:path";
 import { IntercomClient } from "../../src/intercom-public/broker/client.ts";
 import { createMessageReader, writeMessage } from "../../src/intercom-public/broker/framing.ts";
 import { getBrokerSocketPath } from "../../src/intercom-public/broker/paths.ts";
-import { type Message, type SendTargetEnvelope } from "../../src/intercom-public/types.ts";
+import { type DeliveredMessage, type SendTargetEnvelope } from "../../src/intercom-public/types.ts";
 
 const packageDir = process.cwd().endsWith(path.join("packages", "pi-subagents"))
   ? process.cwd()
@@ -145,9 +145,9 @@ async function disconnectAll(clients: IntercomClient[]): Promise<void> {
   }));
 }
 
-function createInbox(client: IntercomClient): { messages: Message[]; dispose: () => void } {
-  const messages: Message[] = [];
-  const onMessage = (_from: unknown, message: Message) => {
+function createInbox(client: IntercomClient): { messages: DeliveredMessage[]; dispose: () => void } {
+  const messages: DeliveredMessage[] = [];
+  const onMessage = (_from: unknown, message: DeliveredMessage) => {
     messages.push(message);
   };
   client.on("message", onMessage);
@@ -157,7 +157,7 @@ function createInbox(client: IntercomClient): { messages: Message[]; dispose: ()
   };
 }
 
-async function waitForReceivedMessage(messages: Message[], expectedText: string): Promise<Message> {
+async function waitForReceivedMessage(messages: DeliveredMessage[], expectedText: string): Promise<DeliveredMessage> {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const hit = messages.find((message) => message.content.text === expectedText);
@@ -185,8 +185,8 @@ test("broker routes duplicate aliases by exact intercomSessionId", { concurrency
       assert.ok(idB);
       assert.notEqual(idA, idB);
 
-      const sendA = await sender.send(idA, { text: "to-target-a" });
-      const sendB = await sender.send(idB, { text: "to-target-b" });
+      const sendA = await sender.sendMachine({ kind: "intercom-session", intercomSessionId: idA }, { text: "to-target-a" });
+      const sendB = await sender.sendManual({ kind: "intercom-session", intercomSessionId: idB }, { text: "to-target-b" });
 
       assert.equal(sendA.delivered, true);
       assert.equal(sendB.delivered, true);
@@ -204,22 +204,36 @@ test("broker routes duplicate aliases by exact intercomSessionId", { concurrency
   });
 });
 
-test("broker structured target re-resolves stale intercomSessionId by piSessionId", { concurrency: false }, async () => {
+test("identity snapshot reconnect policy controls stale intercomSessionId re-resolution", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const target = await connectClient(homeDir, { alias: "supervisor", piSessionId: "pi-parent", cwd: "/work/parent" });
     const sender = await connectClient(homeDir, { alias: "child", piSessionId: "pi-child", cwd: "/work/child" });
     const inbox = createInbox(target);
 
     try {
-      const result = await sender.send({
+      const strict = await sender.sendManual({
+        kind: "identity-snapshot",
         intercomSessionId: "stale-id",
         piSessionId: "pi-parent",
         alias: "supervisor",
+        reconnect: "same-intercom-session",
+      }, {
+        text: "must-not-reresolve-with-strict-policy",
+      });
+      assert.equal(strict.delivered, false);
+      assert.equal(strict.failure?.code, "expired-target");
+
+      const fallback = await sender.sendManual({
+        kind: "identity-snapshot",
+        intercomSessionId: "stale-id",
+        piSessionId: "pi-parent",
+        alias: "supervisor",
+        reconnect: "same-pi-session-if-unique",
       }, {
         text: "reresolved-by-pi-session-id",
       });
 
-      assert.equal(result.delivered, true);
+      assert.equal(fallback.delivered, true);
       const received = await waitForReceivedMessage(inbox.messages, "reresolved-by-pi-session-id");
       assert.equal(received.content.text, "reresolved-by-pi-session-id");
     } finally {
@@ -229,32 +243,36 @@ test("broker structured target re-resolves stale intercomSessionId by piSessionI
   });
 });
 
-test("structured sends include resolved receiver metadata; manual sends still deliver without requiring metadata", { concurrency: false }, async () => {
+test("delivered frames always include resolved exact receiver identity", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const target = await connectClient(homeDir, { alias: "receiver", piSessionId: "pi-receiver", cwd: "/work/receiver" });
     const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", cwd: "/work/sender" });
     const inbox = createInbox(target);
 
     try {
-      const structured = await sender.send({
+      const structured = await sender.sendManual({
+        kind: "identity-snapshot",
         intercomSessionId: target.sessionId ?? undefined,
         piSessionId: "pi-receiver",
         alias: "receiver",
+        reconnect: "same-pi-session-if-unique",
       }, {
         text: "structured-metadata",
       });
       assert.equal(structured.delivered, true);
 
       const structuredMessage = await waitForReceivedMessage(inbox.messages, "structured-metadata");
-      assert.equal(structuredMessage.to?.intercomSessionId, target.sessionId);
-      assert.equal(structuredMessage.to?.piSessionId, "pi-receiver");
-      assert.equal(structuredMessage.to?.alias, "receiver");
+      assert.equal(structuredMessage.to.intercomSessionId, target.sessionId);
+      assert.equal(structuredMessage.to.piSessionId, "pi-receiver");
+      assert.equal(structuredMessage.to.alias, "receiver");
 
-      const manual = await sender.send("receiver", { text: "manual-no-required-metadata" });
+      const manual = await sender.sendManual({ kind: "scoped-alias", alias: "receiver", namespace: "test-namespace" }, { text: "manual-resolved-metadata" });
       assert.equal(manual.delivered, true);
 
-      const manualMessage = await waitForReceivedMessage(inbox.messages, "manual-no-required-metadata");
-      assert.equal(manualMessage.to, undefined);
+      const manualMessage = await waitForReceivedMessage(inbox.messages, "manual-resolved-metadata");
+      assert.equal(manualMessage.to.intercomSessionId, target.sessionId);
+      assert.equal(manualMessage.to.piSessionId, "pi-receiver");
+      assert.equal(manualMessage.to.alias, "receiver");
     } finally {
       inbox.dispose();
       await disconnectAll([sender, target]);
@@ -271,13 +289,14 @@ test("duplicate manual aliases return deterministic candidate error", { concurre
     const inboxB = createInbox(targetB);
 
     try {
-      const result = await sender.send("worker", { text: "ambiguous-manual" });
+      const result = await sender.sendManual("worker", { text: "ambiguous-manual" });
       assert.equal(result.delivered, false);
-      assert.match(result.reason ?? "", /Ambiguous target "worker"/);
-      assert.match(result.reason ?? "", new RegExp(targetA.sessionId ?? ""));
-      assert.match(result.reason ?? "", new RegExp(targetB.sessionId ?? ""));
-      assert.match(result.reason ?? "", /cwd=\/repo\/a/);
-      assert.match(result.reason ?? "", /cwd=\/repo\/b/);
+      assert.equal(result.failure?.code, "ambiguous-alias");
+      assert.equal(result.failure?.candidates.length, 2);
+      assert.equal(result.failure?.candidates.some((candidate) => candidate.intercomSessionId === targetA.sessionId), true);
+      assert.equal(result.failure?.candidates.some((candidate) => candidate.intercomSessionId === targetB.sessionId), true);
+      assert.equal(result.failure?.candidates.some((candidate) => candidate.cwd === "/repo/a"), true);
+      assert.equal(result.failure?.candidates.some((candidate) => candidate.cwd === "/repo/b"), true);
     } finally {
       await disconnectAll([sender, targetA, targetB]);
     }
@@ -303,34 +322,34 @@ test("namespace constrains alias lookup, exact IDs ignore namespace", { concurre
     const inboxB = createInbox(targetB);
 
     try {
-      const namespacedAlias: SendTargetEnvelope = { alias: "dupe", namespace: "team-a" };
-      const byAlias = await sender.send(namespacedAlias, { text: "namespace-hit-team-a" });
+      const namespacedAlias: SendTargetEnvelope = { kind: "scoped-alias", alias: "dupe", namespace: "team-a" };
+      const byAlias = await sender.sendManual(namespacedAlias, { text: "namespace-hit-team-a" });
       assert.equal(byAlias.delivered, true);
       await waitForReceivedMessage(inboxA.messages, "namespace-hit-team-a");
 
       const exactByIdWrongNamespace: SendTargetEnvelope = {
+        kind: "intercom-session",
         intercomSessionId: targetB.sessionId ?? undefined,
-        alias: "dupe",
-        namespace: "team-a",
       };
-      const byId = await sender.send(exactByIdWrongNamespace, { text: "id-ignores-namespace" });
+      const byId = await sender.sendManual(exactByIdWrongNamespace, { text: "id-ignores-namespace" });
       assert.equal(byId.delivered, true);
       await waitForReceivedMessage(inboxB.messages, "id-ignores-namespace");
 
       const staleIdWithPiFallbackWrongNamespace: SendTargetEnvelope = {
+        kind: "identity-snapshot",
         intercomSessionId: "stale",
         piSessionId: "pi-b",
         alias: "dupe",
-        namespace: "team-a",
+        reconnect: "same-pi-session-if-unique",
       };
-      const byPi = await sender.send(staleIdWithPiFallbackWrongNamespace, { text: "pi-id-ignores-namespace" });
+      const byPi = await sender.sendManual(staleIdWithPiFallbackWrongNamespace, { text: "pi-id-ignores-namespace" });
       assert.equal(byPi.delivered, true);
       await waitForReceivedMessage(inboxB.messages, "pi-id-ignores-namespace");
 
-      const namespaceMiss: SendTargetEnvelope = { alias: "dupe", namespace: "missing-team" };
-      const miss = await sender.send(namespaceMiss, { text: "must-not-cross-namespace" });
+      const namespaceMiss: SendTargetEnvelope = { kind: "scoped-alias", alias: "dupe", namespace: "missing-team" };
+      const miss = await sender.sendManual(namespaceMiss, { text: "must-not-cross-namespace" });
       assert.equal(miss.delivered, false);
-      assert.equal(miss.reason, "Session not found");
+      assert.equal(miss.failure?.code, "target-not-found");
       assert.equal(inboxA.messages.some((message) => message.content.text === "must-not-cross-namespace"), false);
       assert.equal(inboxB.messages.some((message) => message.content.text === "must-not-cross-namespace"), false);
     } finally {
@@ -353,7 +372,7 @@ test("manual list + unique alias send behavior", { concurrency: false }, async (
       assert.ok(betaInList);
       assert.equal(betaInList.piSessionId, "pi-beta");
 
-      const send = await alpha.send("beta", { text: "manual-unique-alias-still-works" });
+      const send = await alpha.sendManual("beta", { text: "manual-unique-alias-still-works" });
       assert.equal(send.delivered, true);
       await waitForReceivedMessage(inbox.messages, "manual-unique-alias-still-works");
     } finally {
@@ -363,19 +382,200 @@ test("manual list + unique alias send behavior", { concurrency: false }, async (
   });
 });
 
-test("broker rejects client-supplied from identity", { concurrency: false }, async () => {
+test("raw forged from send frame is rejected by decoder before delivery", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const target = await connectClient(homeDir, { alias: "target", piSessionId: "pi-target", cwd: "/work/target" });
+    const inbox = createInbox(target);
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+    const socket = net.connect(getBrokerSocketPath());
+
+    try {
+      await once(socket, "connect");
+      const frames: unknown[] = [];
+      socket.on("data", createMessageReader((msg) => {
+        frames.push(msg);
+      }, () => {
+        // ignored in this test; close event asserted below
+      }));
+
+      writeMessage(socket, {
+        type: "register",
+        session: {
+          alias: "attacker",
+          piSessionId: "pi-attacker",
+          namespace: "test-namespace",
+          cwd: "/work/attacker",
+          model: "test-model",
+          pid: process.pid,
+          startedAt: Date.now(),
+          lastActivity: Date.now(),
+          leaseTtlMs: 30_000,
+          heartbeatIntervalMs: 10_000,
+        },
+      });
+
+      let didRegister = false;
+      const registerDeadline = Date.now() + 5000;
+      while (Date.now() < registerDeadline) {
+        const registered = frames.find((frame) => {
+          if (typeof frame !== "object" || frame === null) return false;
+          return (frame as { type?: unknown }).type === "registered";
+        });
+        if (registered) {
+          didRegister = true;
+          break;
+        }
+        await wait(25);
+      }
+      assert.equal(didRegister, true, "raw attacker socket did not register");
+
+      writeMessage(socket, {
+        type: "send",
+        origin: "manual",
+        to: { kind: "intercom-session", intercomSessionId: target.sessionId ?? undefined },
+        from: { intercomSessionId: "fake", piSessionId: "fake" },
+        message: {
+          id: "forged-from-raw",
+          timestamp: Date.now(),
+          content: { text: "forged-from-must-not-deliver" },
+        },
+      });
+
+      await Promise.race([
+        once(socket, "close"),
+        wait(3000).then(() => {
+          throw new Error("Timed out waiting for forged frame disconnect");
+        }),
+      ]);
+
+      assert.equal(inbox.messages.some((message) => message.content.text === "forged-from-must-not-deliver"), false);
+      assert.equal(frames.some((frame) => {
+        if (typeof frame !== "object" || frame === null) return false;
+        const record = frame as { type?: unknown; messageId?: unknown };
+        return (record.type === "delivered" || record.type === "delivery_failed") && record.messageId === "forged-from-raw";
+      }), false);
+    } finally {
+      socket.destroy();
+      inbox.dispose();
+      await disconnectAll([target]);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("raw outbound frame with embedded message.to is rejected before delivery", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const target = await connectClient(homeDir, { alias: "target", piSessionId: "pi-target", cwd: "/work/target" });
+    const inbox = createInbox(target);
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+    const socket = net.connect(getBrokerSocketPath());
+
+    try {
+      await once(socket, "connect");
+      const frames: unknown[] = [];
+      socket.on("data", createMessageReader((msg) => {
+        frames.push(msg);
+      }, () => {
+        // ignored in this test; close event asserted below
+      }));
+
+      writeMessage(socket, {
+        type: "register",
+        session: {
+          alias: "attacker",
+          piSessionId: "pi-attacker",
+          namespace: "test-namespace",
+          cwd: "/work/attacker",
+          model: "test-model",
+          pid: process.pid,
+          startedAt: Date.now(),
+          lastActivity: Date.now(),
+          leaseTtlMs: 30_000,
+          heartbeatIntervalMs: 10_000,
+        },
+      });
+
+      let didRegister = false;
+      const registerDeadline = Date.now() + 5000;
+      while (Date.now() < registerDeadline) {
+        const registered = frames.find((frame) => {
+          if (typeof frame !== "object" || frame === null) return false;
+          return (frame as { type?: unknown }).type === "registered";
+        });
+        if (registered) {
+          didRegister = true;
+          break;
+        }
+        await wait(25);
+      }
+      assert.equal(didRegister, true, "raw attacker socket did not register");
+
+      writeMessage(socket, {
+        type: "send",
+        origin: "manual",
+        to: { kind: "intercom-session", intercomSessionId: target.sessionId ?? undefined },
+        message: {
+          id: "outbound-embedded-to",
+          timestamp: Date.now(),
+          to: { intercomSessionId: target.sessionId ?? undefined, piSessionId: "pi-target" },
+          content: { text: "embedded-target-must-not-deliver" },
+        },
+      });
+
+      await Promise.race([
+        once(socket, "close"),
+        wait(3000).then(() => {
+          throw new Error("Timed out waiting for invalid outbound frame disconnect");
+        }),
+      ]);
+
+      assert.equal(inbox.messages.some((message) => message.content.text === "embedded-target-must-not-deliver"), false);
+      assert.equal(frames.some((frame) => {
+        if (typeof frame !== "object" || frame === null) return false;
+        const record = frame as { type?: unknown; messageId?: unknown };
+        return (record.type === "delivered" || record.type === "delivery_failed") && record.messageId === "outbound-embedded-to";
+      }), false);
+    } finally {
+      socket.destroy();
+      inbox.dispose();
+      await disconnectAll([target]);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("machine send rejects alias targets at client boundary and keeps socket connected", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const target = await connectClient(homeDir, { alias: "target", piSessionId: "pi-target", cwd: "/work/target" });
     const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", cwd: "/work/sender" });
     const inbox = createInbox(target);
     try {
-      const result = await sender.send({ intercomSessionId: target.sessionId ?? undefined }, {
-        text: "forged-from-must-not-deliver",
-        from: { intercomSessionId: "attacker", piSessionId: "pi-attacker" },
-      } as never);
-      assert.equal(result.delivered, false);
-      assert.equal(result.reason, "forged-from-field");
-      assert.equal(inbox.messages.some((message) => message.content.text === "forged-from-must-not-deliver"), false);
+      const byString = await sender.sendMachine("target" as never, {
+        text: "machine-string-alias-must-not-deliver",
+      });
+      assert.equal(byString.delivered, false);
+      assert.equal(byString.failure?.code, "unsafe-machine-alias-target");
+
+      const byScopedAlias = await sender.sendMachine({ kind: "scoped-alias", alias: "target", namespace: "test-namespace" } as never, {
+        text: "machine-scoped-alias-must-not-deliver",
+      });
+      assert.equal(byScopedAlias.delivered, false);
+      assert.equal(byScopedAlias.failure?.code, "unsafe-machine-alias-target");
+
+      assert.equal(sender.isConnected(), true);
+      assert.equal(inbox.messages.some((message) => message.content.text.includes("must-not-deliver")), false);
     } finally {
       inbox.dispose();
       await disconnectAll([sender, target]);
@@ -383,22 +583,92 @@ test("broker rejects client-supplied from identity", { concurrency: false }, asy
   });
 });
 
-test("machine messages reject alias-only targets", { concurrency: false }, async () => {
+test("raw machine send with alias target is rejected by decoder before delivery", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const target = await connectClient(homeDir, { alias: "target", piSessionId: "pi-target", cwd: "/work/target" });
-    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", cwd: "/work/sender" });
     const inbox = createInbox(target);
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+    const socket = net.connect(getBrokerSocketPath());
+    const frames: unknown[] = [];
+
     try {
-      const result = await sender.send({ alias: "target", namespace: "/work/target" }, {
-        text: "machine-alias-must-not-deliver",
+      await once(socket, "connect");
+      socket.on("data", createMessageReader((msg) => {
+        frames.push(msg);
+      }, () => {
+        // ignore; close asserted below
+      }));
+
+      writeMessage(socket, {
+        type: "register",
+        session: {
+          alias: "attacker",
+          piSessionId: "pi-attacker",
+          namespace: "test-namespace",
+          cwd: "/work/attacker",
+          model: "test-model",
+          pid: process.pid,
+          startedAt: Date.now(),
+          lastActivity: Date.now(),
+          leaseTtlMs: 30_000,
+          heartbeatIntervalMs: 10_000,
+        },
+      });
+
+      let didRegister = false;
+      const registerDeadline = Date.now() + 5000;
+      while (Date.now() < registerDeadline) {
+        const registered = frames.find((frame) => {
+          if (typeof frame !== "object" || frame === null) return false;
+          return (frame as { type?: unknown }).type === "registered";
+        });
+        if (registered) {
+          didRegister = true;
+          break;
+        }
+        await wait(25);
+      }
+      assert.equal(didRegister, true, "raw attacker socket did not register");
+
+      writeMessage(socket, {
+        type: "send",
         origin: "machine",
-      } as never);
-      assert.equal(result.delivered, false);
-      assert.equal(result.reason, "unsafe-machine-alias-target");
-      assert.equal(inbox.messages.some((message) => message.content.text === "machine-alias-must-not-deliver"), false);
+        to: {
+          kind: "scoped-alias",
+          alias: "target",
+          namespace: "test-namespace",
+        },
+        message: {
+          id: "machine-alias-raw",
+          timestamp: Date.now(),
+          content: { text: "must-not-deliver" },
+        },
+      });
+
+      await Promise.race([
+        once(socket, "close"),
+        wait(3000).then(() => {
+          throw new Error("Timed out waiting for machine alias decoder disconnect");
+        }),
+      ]);
+
+      assert.equal(inbox.messages.some((message) => message.content.text === "must-not-deliver"), false);
+      assert.equal(frames.some((frame) => {
+        if (typeof frame !== "object" || frame === null) return false;
+        const record = frame as { type?: unknown; messageId?: unknown };
+        return (record.type === "delivered" || record.type === "delivery_failed") && record.messageId === "machine-alias-raw";
+      }), false);
     } finally {
+      socket.destroy();
       inbox.dispose();
-      await disconnectAll([sender, target]);
+      await disconnectAll([target]);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
     }
   });
 });
@@ -422,7 +692,7 @@ test("unregistered machine sends fail closed with unregistered-sender", { concur
       writeMessage(socket, {
         type: "send",
         origin: "machine",
-        to: { piSessionId: "pi-target" },
+        to: { kind: "pi-session", piSessionId: "pi-target" },
         message: {
           id: "unregistered-machine-message",
           timestamp: Date.now(),
@@ -432,7 +702,7 @@ test("unregistered machine sends fail closed with unregistered-sender", { concur
       assert.deepEqual(await response, {
         type: "delivery_failed",
         messageId: "unregistered-machine-message",
-        reason: "unregistered-sender",
+        failure: { code: "unregistered-sender" },
       });
     } finally {
       socket.destroy();
@@ -440,6 +710,26 @@ test("unregistered machine sends fail closed with unregistered-sender", { concur
       else process.env.HOME = previousHome;
       if (previousUserProfile === undefined) delete process.env.USERPROFILE;
       else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("expired sender session fails with forged-sender code", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", leaseTtlMs: 50 });
+    const target = await connectClient(homeDir, { alias: "target", piSessionId: "pi-target" });
+    const sweeper = await connectClient(homeDir, { alias: "sweeper", piSessionId: "pi-sweeper" });
+    const inbox = createInbox(target);
+    try {
+      await wait(80);
+      await sweeper.listSessions();
+      const result = await sender.sendManual({ kind: "intercom-session", intercomSessionId: target.sessionId ?? undefined }, { text: "forged-sender-after-expiry" });
+      assert.equal(result.delivered, false);
+      assert.equal(result.failure?.code, "forged-sender");
+      assert.equal(inbox.messages.some((message) => message.content.text === "forged-sender-after-expiry"), false);
+    } finally {
+      inbox.dispose();
+      await disconnectAll([sweeper, sender, target]);
     }
   });
 });
@@ -452,12 +742,25 @@ test("duplicate live piSessionId blocks exact piSessionId resolution", { concurr
     const inboxA = createInbox(targetA);
     const inboxB = createInbox(targetB);
     try {
-      const result = await sender.send({ piSessionId: "pi-dup" }, { text: "must-not-pick-duplicate" });
+      const result = await sender.sendManual({ kind: "pi-session", piSessionId: "pi-dup" }, { text: "must-not-pick-duplicate" });
       assert.equal(result.delivered, false);
-      assert.match(result.reason ?? "", /duplicate-pi-session-conflict/);
-      assert.match(result.reason ?? "", /piSessionId=pi-dup/);
-      assert.match(result.reason ?? "", /cwd=\/work\/a/);
-      assert.match(result.reason ?? "", /cwd=\/work\/b/);
+      assert.equal(result.failure?.code, "duplicate-pi-session");
+      assert.equal(result.failure?.piSessionId, "pi-dup");
+      assert.equal(result.failure?.candidates.some((candidate) => candidate.cwd === "/work/a"), true);
+      assert.equal(result.failure?.candidates.some((candidate) => candidate.cwd === "/work/b"), true);
+
+      const snapshot = await sender.sendManual({
+        kind: "identity-snapshot",
+        intercomSessionId: "stale-intercom",
+        piSessionId: "pi-dup",
+        reconnect: "same-pi-session-if-unique",
+      }, { text: "snapshot-must-not-pick-duplicate" });
+      assert.equal(snapshot.delivered, false);
+      assert.equal(snapshot.failure?.code, "duplicate-pi-session");
+      assert.equal(snapshot.failure?.piSessionId, "pi-dup");
+      assert.equal(snapshot.failure?.candidates.some((candidate) => candidate.cwd === "/work/a"), true);
+      assert.equal(snapshot.failure?.candidates.some((candidate) => candidate.cwd === "/work/b"), true);
+
       assert.equal(inboxA.messages.length, 0);
       assert.equal(inboxB.messages.length, 0);
     } finally {
@@ -510,15 +813,15 @@ test("expired sessions are ignored and heartbeat extends lease", { concurrency: 
     const aliveInbox = createInbox(keptAlive);
     try {
       await wait(130);
-      const expiredByPi = await sender.send({ piSessionId: "pi-ttl" }, { text: "expired-pi" });
+      const expiredByPi = await sender.sendManual({ kind: "pi-session", piSessionId: "pi-ttl" }, { text: "expired-pi" });
       assert.equal(expiredByPi.delivered, false);
-      assert.equal(expiredByPi.reason, "Session not found");
-      const expiredByAlias = await sender.send({ alias: "ttl" }, { text: "expired-alias" });
+      assert.equal(expiredByPi.failure?.code, "expired-target");
+      const expiredByAlias = await sender.sendManual({ kind: "scoped-alias", alias: "ttl", namespace: "test-namespace" }, { text: "expired-alias" });
       assert.equal(expiredByAlias.delivered, false);
-      assert.equal(expiredByAlias.reason, "Session not found");
+      assert.equal(expiredByAlias.failure?.code, "target-not-found");
       keptAlive.heartbeat();
       await wait(120);
-      const alive = await sender.send({ piSessionId: "pi-alive" }, { text: "heartbeat-kept-alive" });
+      const alive = await sender.sendManual({ kind: "pi-session", piSessionId: "pi-alive" }, { text: "heartbeat-kept-alive" });
       assert.equal(alive.delivered, true);
       await waitForReceivedMessage(aliveInbox.messages, "heartbeat-kept-alive");
     } finally {
@@ -534,13 +837,13 @@ test("duplicate alias in same namespace returns ambiguity with identity candidat
     const targetB = await connectClient(homeDir, { alias: "same", piSessionId: "pi-b", namespace: "team", cwd: "/repo/b" });
     const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", namespace: "team" });
     try {
-      const result = await sender.send({ alias: "same" }, { text: "ambiguous-team" });
+      const result = await sender.sendManual({ kind: "scoped-alias", alias: "same", namespace: "team" }, { text: "ambiguous-team" });
       assert.equal(result.delivered, false);
-      assert.match(result.reason ?? "", /ambiguous-target/);
-      assert.match(result.reason ?? "", /piSessionId=pi-a/);
-      assert.match(result.reason ?? "", /piSessionId=pi-b/);
-      assert.match(result.reason ?? "", /namespace=team/);
-      assert.match(result.reason ?? "", /leaseExpiresAt=/);
+      assert.equal(result.failure?.code, "ambiguous-alias");
+      assert.equal(result.failure?.candidates.some((candidate) => candidate.piSessionId === "pi-a"), true);
+      assert.equal(result.failure?.candidates.some((candidate) => candidate.piSessionId === "pi-b"), true);
+      assert.equal(result.failure?.candidates.some((candidate) => candidate.namespace === "team"), true);
+      assert.equal(result.failure?.candidates.some((candidate) => typeof candidate.leaseExpiresAt === "number"), true);
     } finally {
       await disconnectAll([sender, targetA, targetB]);
     }
@@ -565,7 +868,7 @@ test("alias lookup honors explicit alias when it differs from registered alias",
     const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", namespace: "team" });
     const inbox = createInbox(target);
     try {
-      const result = await sender.send({ alias: "exact-alias" }, { text: "alias-field-hit" });
+      const result = await sender.sendManual({ kind: "scoped-alias", alias: "exact-alias", namespace: "team" }, { text: "alias-field-hit" });
       assert.equal(result.delivered, true);
       const received = await waitForReceivedMessage(inbox.messages, "alias-field-hit");
       assert.equal(received.to?.alias, "exact-alias");
@@ -584,18 +887,18 @@ test("alias lookup defaults to sender namespace and explicit global can be ambig
     const inboxA = createInbox(targetA);
     const inboxB = createInbox(targetB);
     try {
-      const local = await sender.send({ alias: "cross" }, { text: "namespace-default" });
+      const local = await sender.sendManual({ kind: "scoped-alias", alias: "cross", namespace: "team-a" }, { text: "namespace-default" });
       assert.equal(local.delivered, true);
       await waitForReceivedMessage(inboxA.messages, "namespace-default");
       assert.equal(inboxB.messages.some((message) => message.content.text === "namespace-default"), false);
 
-      const global = await sender.send({ alias: "cross", global: true }, { text: "global-ambiguous" });
+      const global = await sender.sendManual({ kind: "global-alias", alias: "cross" }, { text: "global-ambiguous" });
       assert.equal(global.delivered, false);
-      assert.match(global.reason ?? "", /ambiguous-target/);
-      assert.match(global.reason ?? "", /namespace=team-a/);
-      assert.match(global.reason ?? "", /namespace=team-b/);
+      assert.equal(global.failure?.code, "ambiguous-alias");
+      assert.equal(global.failure?.candidates.some((candidate) => candidate.namespace === "team-a"), true);
+      assert.equal(global.failure?.candidates.some((candidate) => candidate.namespace === "team-b"), true);
 
-      const exact = await sender.send({ intercomSessionId: targetB.sessionId ?? undefined, alias: "cross" }, { text: "exact-global" });
+      const exact = await sender.sendManual({ kind: "intercom-session", intercomSessionId: targetB.sessionId ?? undefined }, { text: "exact-global" });
       assert.equal(exact.delivered, true);
       await waitForReceivedMessage(inboxB.messages, "exact-global");
     } finally {
@@ -677,6 +980,39 @@ test("session readiness + subagent metadata roundtrip via registration/presence"
       assert.fail("Timed out waiting for readiness=ready");
     } finally {
       await disconnectAll([observer, child]);
+    }
+  });
+});
+
+test("presence updates reject unknown legacy fields", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const target = await connectClient(homeDir, { alias: "stable-alias", piSessionId: "pi-stable", cwd: "/work/stable" });
+    const observer = await connectClient(homeDir, { alias: "observer", piSessionId: "pi-observer", cwd: "/work/observer" });
+
+    try {
+      target.updatePresence({ status: "thinking" });
+      target.updatePresence({ model: "stable-model-v2" });
+      target.updatePresence({ readiness: { state: "ready", updatedAt: Date.now() } });
+      target.updatePresence({ name: "mutated-name", alias: "mutated-alias", status: "thinking-again" } as never);
+
+      const disconnectedDeadline = Date.now() + 5000;
+      while (Date.now() < disconnectedDeadline && target.isConnected()) {
+        await wait(25);
+      }
+      assert.equal(target.isConnected(), false, "target should disconnect after invalid presence payload");
+
+      const removedDeadline = Date.now() + 5000;
+      while (Date.now() < removedDeadline) {
+        const refreshed = (await observer.listSessions()).find((session) => session.piSessionId === "pi-stable");
+        if (!refreshed) {
+          return;
+        }
+        await wait(25);
+      }
+
+      assert.fail("Timed out waiting for invalid-presence session removal");
+    } finally {
+      await disconnectAll([observer, target]);
     }
   });
 });

@@ -9,14 +9,18 @@ import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { loadConfig, type IntercomConfig } from "./config.ts";
 import { deriveIntercomNamespace } from "./namespace.ts";
+import { formatDeliveryFailure, isRetryableDeliveryFailure } from "./delivery-failure.ts";
 import {
   INTERCOM_HEARTBEAT_INTERVAL_MS,
   buildIntercomRegistration,
+  type DeliveryFailure,
   type SessionInfo,
   type SessionReadiness,
   type SessionSubagentMetadata,
-  type Message,
   type Attachment,
+  type DeliveredMessage,
+  type IdentitySnapshotTarget,
+  type Message,
   type SendTargetEnvelope,
 } from "./types.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
@@ -95,7 +99,8 @@ interface InboundMessageEntry {
 interface ResolutionFailureDiagnostic {
   action: string;
   target?: unknown;
-  reason: string;
+  failureCode?: DeliveryFailure["code"];
+  message: string;
   timestamp: number;
 }
 
@@ -108,7 +113,7 @@ interface DroppedMisrouteDiagnostic {
   intendedIntercomSessionId?: string;
   actualIntercomSessionId?: string;
   timestamp: number;
-  reason: "receiver_pi_session_mismatch" | "receiver_intercom_session_mismatch";
+  reason: "receiver_identity_missing" | "receiver_pi_session_mismatch" | "receiver_intercom_session_mismatch";
 }
 
 interface ParsedSubagentIntercomPayload {
@@ -510,38 +515,72 @@ function shortSessionId(sessionId: string): string {
   return sessionId.slice(0, 8);
 }
 function normalizeRelayTarget(target: unknown): SendTargetEnvelope | null {
-  if (typeof target !== "object" || target === null) {
+  if (typeof target !== "object" || target === null || Array.isArray(target)) {
     return null;
   }
-  const candidate = target as {
-    intercomSessionId?: unknown;
-    piSessionId?: unknown;
-    alias?: unknown;
-    namespace?: unknown;
-  };
-  const intercomSessionId = typeof candidate.intercomSessionId === "string" ? candidate.intercomSessionId.trim() : "";
-  const piSessionId = typeof candidate.piSessionId === "string" ? candidate.piSessionId.trim() : "";
-  const alias = typeof candidate.alias === "string" ? candidate.alias.trim() : "";
-  const namespace = typeof candidate.namespace === "string" ? candidate.namespace.trim() : "";
-  if (!intercomSessionId && !piSessionId && !alias) {
+
+  const candidate = target as Record<string, unknown>;
+  const kind = typeof candidate.kind === "string" ? candidate.kind.trim() : "";
+  if (!kind) {
     return null;
   }
-  return {
-    ...(intercomSessionId ? { intercomSessionId } : {}),
-    ...(piSessionId ? { piSessionId } : {}),
-    ...(alias ? { alias } : {}),
-    ...(namespace ? { namespace } : {}),
-  };
+
+  switch (kind) {
+    case "intercom-session": {
+      const intercomSessionId = typeof candidate.intercomSessionId === "string" ? candidate.intercomSessionId.trim() : "";
+      return intercomSessionId ? { kind, intercomSessionId } : null;
+    }
+    case "pi-session": {
+      const piSessionId = typeof candidate.piSessionId === "string" ? candidate.piSessionId.trim() : "";
+      return piSessionId ? { kind, piSessionId } : null;
+    }
+    case "identity-snapshot": {
+      const intercomSessionId = typeof candidate.intercomSessionId === "string" ? candidate.intercomSessionId.trim() : "";
+      const piSessionId = typeof candidate.piSessionId === "string" ? candidate.piSessionId.trim() : "";
+      const reconnect = typeof candidate.reconnect === "string" ? candidate.reconnect.trim() : "";
+      const alias = typeof candidate.alias === "string" ? candidate.alias.trim() : "";
+      if (!intercomSessionId || !piSessionId) {
+        return null;
+      }
+      if (reconnect !== "same-intercom-session" && reconnect !== "same-pi-session-if-unique") {
+        return null;
+      }
+      return {
+        kind,
+        intercomSessionId,
+        piSessionId,
+        reconnect,
+        ...(alias ? { alias } : {}),
+      };
+    }
+    case "scoped-alias": {
+      const alias = typeof candidate.alias === "string" ? candidate.alias.trim() : "";
+      const namespace = typeof candidate.namespace === "string" ? candidate.namespace.trim() : "";
+      return alias && namespace ? { kind, alias, namespace } : null;
+    }
+    case "global-alias": {
+      const alias = typeof candidate.alias === "string" ? candidate.alias.trim() : "";
+      return alias ? { kind, alias } : null;
+    }
+    default:
+      return null;
+  }
 }
 
 function formatRelayTarget(target: string | SendTargetEnvelope): string {
   if (typeof target === "string") return target;
-  const parts = [
-    target.intercomSessionId ? `intercomSessionId=${target.intercomSessionId}` : undefined,
-    target.piSessionId ? `piSessionId=${target.piSessionId}` : undefined,
-    target.alias ? `alias=${target.alias}` : undefined,
-  ].filter((entry): entry is string => Boolean(entry));
-  return parts.length > 0 ? parts.join(", ") : "unknown-target";
+  switch (target.kind) {
+    case "intercom-session":
+      return `intercomSessionId=${target.intercomSessionId}`;
+    case "pi-session":
+      return `piSessionId=${target.piSessionId}`;
+    case "identity-snapshot":
+      return `intercomSessionId=${target.intercomSessionId}, piSessionId=${target.piSessionId}${target.alias ? `, alias=${target.alias}` : ""}, reconnect=${target.reconnect}`;
+    case "scoped-alias":
+      return `alias=${target.alias}@${target.namespace}`;
+    case "global-alias":
+      return `global alias=${target.alias}`;
+  }
 }
 
 function parseSubagentIntercomPayload(payload: unknown): ParsedSubagentIntercomPayload | null {
@@ -550,6 +589,7 @@ function parseSubagentIntercomPayload(payload: unknown): ParsedSubagentIntercomP
   }
   const record = payload as Record<string, unknown>;
   const target = normalizeRelayTarget(record.target)
+    ?? normalizeRelayTarget(record.to)
     ?? (typeof record.to === "string" && record.to.trim() ? record.to.trim() : null);
   if (!target || typeof record.message !== "string") {
     return null;
@@ -578,7 +618,7 @@ function parseSubagentIntercomPayload(payload: unknown): ParsedSubagentIntercomP
     ...(source ? { source } : {}),
   };
 }
-function resolveIntercomPresenceName(sessionName: string | undefined, sessionId: string): string {
+function resolveIntercomRoutingAlias(sessionName: string | undefined, sessionId: string): string {
   const trimmedName = sessionName?.trim();
   if (trimmedName) {
     return trimmedName;
@@ -586,10 +626,8 @@ function resolveIntercomPresenceName(sessionName: string | undefined, sessionId:
   const normalizedSessionId = sessionId.startsWith("session-") ? sessionId.slice("session-".length) : sessionId;
   return `${DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX}-${normalizedSessionId.slice(0, 8)}`;
 }
-function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: string } {
-  return {
-    name: resolveIntercomPresenceName(pi.getSessionName(), sessionId),
-  };
+function deriveRoutingAlias(pi: ExtensionAPI, sessionId: string): string {
+  return resolveIntercomRoutingAlias(pi.getSessionName(), sessionId);
 }
 
 function toSubagentLocator(payload: ParsedSubagentIntercomPayload): LiveSubagentLocator | null {
@@ -700,6 +738,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
   let reconnectPromiseGeneration: number | null = null;
   let startupConnectTimer: unknown | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
+  let registeredRoutingAlias: string | null = null;
   let reconnectAttempt = 0;
   let shuttingDown = false;
   let disposed = true;
@@ -715,12 +754,12 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
   let replyWaiter: {
     from: ReplySenderMatcher;
     replyTo: string;
-    resolve: (message: Message) => void;
+    resolve: (message: DeliveredMessage) => void;
     reject: (error: Error) => void;
   } | null = null;
   const childOrchestratorMetadata = readChildOrchestratorMetadata();
   const subagentRegistrationMetadata = resolveSubagentRegistrationMetadata(childOrchestratorMetadata);
-  function waitForReply(from: string | ReplySenderMatcher, replyTo: string, signal?: AbortSignal): Promise<Message> {
+  function waitForReply(from: string | ReplySenderMatcher, replyTo: string, signal?: AbortSignal): Promise<DeliveredMessage> {
     if (replyWaiter) {
       return Promise.reject(new Error("Already waiting for a reply"));
     }
@@ -844,7 +883,8 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       throw new Error("Intercom runtime not initialized");
     }
 
-    const identity = buildPresenceIdentity(pi, currentSessionId);
+    const routingAlias = deriveRoutingAlias(pi, currentSessionId);
+    registeredRoutingAlias = routingAlias;
     const readiness: SessionReadiness = {
       state: "initializing",
       updatedAt: Date.now(),
@@ -861,7 +901,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     }
     return buildIntercomRegistration({
       piSessionId: currentSessionId,
-      alias: identity.name,
+      alias: routingAlias,
       namespace: namespace.namespace,
       cwd,
       model: currentModel,
@@ -872,12 +912,6 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       readiness,
       ...(subagentRegistrationMetadata ? { subagent: subagentRegistrationMetadata } : {}),
     });
-  }
-  function syncPresenceIdentity(sessionId: string): void {
-    if (!client || !getLiveContext()) {
-      return;
-    }
-    client.updatePresence({ ...buildPresenceIdentity(pi, sessionId), status: currentStatus() });
   }
   function syncPresenceStatus(): void {
     if (!client || !currentSessionId || !getLiveContext()) {
@@ -897,7 +931,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       },
     });
   }
-  function currentSessionTargetMatches(to: string | { intercomSessionId?: string; piSessionId?: string; alias?: string }, activeClient?: IntercomClient): boolean {
+  function currentSessionTargetMatches(to: string | SendTargetEnvelope, activeClient?: IntercomClient): boolean {
     const targets = new Set<string>();
     const addTarget = (target: string | undefined | null) => {
       const trimmed = target?.trim();
@@ -906,19 +940,43 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     addTarget(currentSessionId);
     addTarget(activeClient?.sessionId);
     addTarget(pi.getSessionName());
-    if (currentSessionId) addTarget(buildPresenceIdentity(pi, currentSessionId).name);
+    addTarget(registeredRoutingAlias);
+
     if (typeof to === "string") {
       return targets.has(to.trim().toLowerCase());
     }
-    return [to.intercomSessionId, to.piSessionId, to.alias]
-      .some((candidate) => typeof candidate === "string" && targets.has(candidate.trim().toLowerCase()));
+
+    switch (to.kind) {
+      case "intercom-session":
+        return targets.has(to.intercomSessionId.trim().toLowerCase());
+      case "pi-session":
+        return targets.has(to.piSessionId.trim().toLowerCase());
+      case "identity-snapshot":
+        return targets.has(to.intercomSessionId.trim().toLowerCase())
+          || targets.has(to.piSessionId.trim().toLowerCase())
+          || (to.alias ? targets.has(to.alias.trim().toLowerCase()) : false);
+      case "scoped-alias":
+      case "global-alias":
+        return targets.has(to.alias.trim().toLowerCase());
+    }
   }
   function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "followUp", generation = runtimeGeneration): void {
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) {
       return;
     }
     if (delivery !== "followUp") {
-      replyTracker.queueTurnContext({ from: entry.from, message: entry.message, receivedAt: Date.now() });
+      replyTracker.queueTurnContext({
+        from: entry.from,
+        message: entry.message,
+        receivedAt: Date.now(),
+        replyTarget: {
+          kind: "identity-snapshot",
+          intercomSessionId: entry.from.id,
+          piSessionId: entry.from.piSessionId,
+          reconnect: "same-pi-session-if-unique",
+          ...(entry.from.alias ? { alias: entry.from.alias } : {}),
+        },
+      });
     }
     const senderDisplay = entry.from.alias || entry.from.id.slice(0, 8);
     const replyInstruction = entry.replyCommand ? `\n\nTo reply, use the intercom tool: ${entry.replyCommand}` : "";
@@ -975,8 +1033,18 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     pendingIdleMessages.push(entry);
     scheduleInboundFlush();
   }
-  function recordResolutionFailure(action: string, target: unknown, reason: string): void {
-    const diagnostic: ResolutionFailureDiagnostic = { action, target, reason, timestamp: Date.now() };
+  function recordResolutionFailure(
+    action: string,
+    target: unknown,
+    details: { failure?: DeliveryFailure; message?: string },
+  ): void {
+    const diagnostic: ResolutionFailureDiagnostic = {
+      action,
+      target,
+      ...(details.failure ? { failureCode: details.failure.code } : {}),
+      message: details.message ?? (details.failure ? formatDeliveryFailure(details.failure) : "resolution failure"),
+      timestamp: Date.now(),
+    };
     resolutionFailureDiagnostics.push(diagnostic);
     if (resolutionFailureDiagnostics.length > MAX_DROPPED_MISROUTE_DIAGNOSTICS) {
       resolutionFailureDiagnostics.splice(0, resolutionFailureDiagnostics.length - MAX_DROPPED_MISROUTE_DIAGNOSTICS);
@@ -985,13 +1053,16 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
   }
 
   function recordDroppedMisroutedMessage(from: SessionInfo, message: Message, actualPiSessionId: string, reason: DroppedMisrouteDiagnostic["reason"], actualIntercomSessionId?: string): void {
+    const receiver = ("to" in message && typeof message.to === "object" && message.to !== null)
+      ? message.to
+      : undefined;
     const diagnostic: DroppedMisrouteDiagnostic = {
       messageId: message.id,
       senderId: from.id,
       ...(from.alias ? { senderName: from.alias } : {}),
-      ...(message.to?.piSessionId ? { intendedPiSessionId: message.to.piSessionId } : {}),
+      ...(receiver?.piSessionId ? { intendedPiSessionId: receiver.piSessionId } : {}),
       actualPiSessionId,
-      ...(message.to?.intercomSessionId ? { intendedIntercomSessionId: message.to.intercomSessionId } : {}),
+      ...(receiver?.intercomSessionId ? { intendedIntercomSessionId: receiver.intercomSessionId } : {}),
       ...(actualIntercomSessionId ? { actualIntercomSessionId } : {}),
       timestamp: message.timestamp,
       reason,
@@ -1013,32 +1084,49 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     }
 
     const runtimePiSessionId = currentSessionId ?? ctx.sessionManager.getSessionId();
-    if (message.to?.piSessionId && message.to.piSessionId !== runtimePiSessionId) {
+    const receiver = ("to" in message && typeof message.to === "object" && message.to !== null)
+      ? message.to
+      : undefined;
+    if (!receiver?.intercomSessionId || !receiver.piSessionId) {
+      recordDroppedMisroutedMessage(from, message, runtimePiSessionId, "receiver_identity_missing", client?.sessionId ?? undefined);
+      return;
+    }
+    if (receiver.piSessionId !== runtimePiSessionId) {
       recordDroppedMisroutedMessage(from, message, runtimePiSessionId, "receiver_pi_session_mismatch", client?.sessionId ?? undefined);
       return;
     }
-    if (message.to?.intercomSessionId && client?.sessionId && message.to.intercomSessionId !== client.sessionId) {
+    if (client?.sessionId && receiver.intercomSessionId !== client.sessionId) {
       recordDroppedMisroutedMessage(from, message, runtimePiSessionId, "receiver_intercom_session_mismatch", client.sessionId);
       return;
     }
+
+    const deliveredMessage: DeliveredMessage = {
+      ...message,
+      to: {
+        intercomSessionId: receiver.intercomSessionId,
+        piSessionId: receiver.piSessionId,
+        ...(receiver.alias ? { alias: receiver.alias } : {}),
+      },
+    };
+
     if (replyWaiter) {
       const fromMatches = (replyWaiter.from.intercomSessionId && from.id === replyWaiter.from.intercomSessionId)
         || (replyWaiter.from.piSessionId && from.piSessionId === replyWaiter.from.piSessionId);
-      const replyMatches = message.replyTo === replyWaiter.replyTo;
+      const replyMatches = deliveredMessage.replyTo === replyWaiter.replyTo;
       if (fromMatches && replyMatches) {
-        replyWaiter.resolve(message);
+        replyWaiter.resolve(deliveredMessage);
         return;
       }
     }
-    const attachmentText = message.content.attachments?.length
-      ? formatAttachments(message.content.attachments)
+    const attachmentText = deliveredMessage.content.attachments?.length
+      ? formatAttachments(deliveredMessage.content.attachments)
       : "";
-    const bodyText = `${message.content.text}${attachmentText}`;
-    const replyCommand = config.replyHint && message.expectsReply
+    const bodyText = `${deliveredMessage.content.text}${attachmentText}`;
+    const replyCommand = config.replyHint && deliveredMessage.expectsReply
       ? `intercom({ action: "reply", message: "..." })`
       : undefined;
-    replyTracker.recordIncomingMessage(from, message);
-    const entry = { from, message, replyCommand, bodyText };
+    replyTracker.recordIncomingMessage(from, deliveredMessage);
+    const entry = { from, message: deliveredMessage, replyCommand, bodyText };
     void (async () => {
       const activeContext = getLiveContext(liveContext, messageGeneration);
       if (!activeContext) {
@@ -1047,14 +1135,14 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       if (!activeContext.isIdle()) {
         if (!activeContext.hasUI) {
           const activeClient = client;
-          if (!message.replyTo && activeClient?.isConnected()) {
+          if (!deliveredMessage.replyTo && activeClient?.isConnected()) {
             try {
-              const result = await activeClient.send(from.id, {
+              const result = await activeClient.sendMachine(buildSessionTargetEnvelope(from), {
                 text: "This agent is running in non-interactive mode and cannot respond to intercom messages while it is working. It will continue its current task and exit when done.",
-                replyTo: message.id,
+                replyTo: deliveredMessage.id,
               });
               if (result.delivered && getLiveContext(liveContext, messageGeneration)) {
-                replyTracker.markReplied(message.id);
+                replyTracker.markReplied(deliveredMessage.id);
               }
             } catch {
               // Best-effort reply; keep the busy non-interactive session running either way.
@@ -1164,20 +1252,39 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     reconnectPromiseGeneration = generationAtStart;
     return nextReconnectPromise;
   }
-  async function findSessionByNameOrId(activeClient: IntercomClient, nameOrId: string): Promise<SessionInfo | null> {
+  async function findSessionByNameOrId(
+    activeClient: IntercomClient,
+    nameOrId: string,
+  ): Promise<{ session: SessionInfo | null; matchedBy: "intercom-session" | "pi-session" | "alias" | null; currentNamespace?: string }> {
     const sessions = await activeClient.listSessions();
-    const byId = sessions.find((s) => s.id === nameOrId || s.piSessionId === nameOrId);
-    if (byId) {
-      return byId;
-    }
     const currentSession = sessions.find((s) => s.id === activeClient.sessionId);
-    const lowerName = nameOrId.toLowerCase();
-    const byName = sessions.filter((s) => s.alias.toLowerCase() === lowerName
-      && (!currentSession?.namespace || s.namespace === currentSession.namespace));
-    if (byName.length > 1) {
-      throw new Error(`ambiguous-target: Multiple sessions with alias "${nameOrId}" are connected in namespace ${currentSession?.namespace ?? "global"}. Use piSessionId or intercomSessionId instead.`);
+    const currentNamespace = currentSession?.namespace;
+
+    const byIntercomId = sessions.find((session) => session.id === nameOrId);
+    if (byIntercomId) {
+      return { session: byIntercomId, matchedBy: "intercom-session", ...(currentNamespace ? { currentNamespace } : {}) };
     }
-    return byName[0] ?? null;
+
+    const byPiSession = sessions.filter((session) => session.piSessionId === nameOrId);
+    if (byPiSession.length > 1) {
+      throw new Error(`ambiguous-target: Multiple sessions share piSessionId "${nameOrId}". Use intercomSessionId instead.`);
+    }
+    if (byPiSession.length === 1) {
+      return { session: byPiSession[0] ?? null, matchedBy: "pi-session", ...(currentNamespace ? { currentNamespace } : {}) };
+    }
+
+    const lowerName = nameOrId.toLowerCase();
+    const byName = sessions.filter((session) => session.alias.toLowerCase() === lowerName
+      && (!currentNamespace || session.namespace === currentNamespace));
+    if (byName.length > 1) {
+      throw new Error(`ambiguous-target: Multiple sessions with alias "${nameOrId}" are connected in namespace ${currentNamespace ?? "global"}. Use piSessionId or intercomSessionId instead.`);
+    }
+
+    return {
+      session: byName[0] ?? null,
+      matchedBy: byName.length === 1 ? "alias" : null,
+      ...(currentNamespace ? { currentNamespace } : {}),
+    };
   }
 
   function findLiveSubagentSession(
@@ -1233,49 +1340,102 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
   }
   function buildSessionTargetEnvelope(session: SessionInfo): SendTargetEnvelope {
     return {
+      kind: "identity-snapshot",
       intercomSessionId: session.id,
-      ...(session.piSessionId ? { piSessionId: session.piSessionId } : {}),
+      piSessionId: session.piSessionId,
+      reconnect: "same-pi-session-if-unique",
       ...(session.alias ? { alias: session.alias } : {}),
     };
   }
-  function isRetryableDeliveryReason(reason: string | undefined): boolean {
-    if (!reason) return false;
-    const normalized = reason.toLowerCase();
-    return normalized.includes("session not found")
-      || normalized.includes("may not exist")
-      || normalized.includes("has disconnected");
+  function targetIdentityKey(target: string | SendTargetEnvelope): string {
+    if (typeof target === "string") {
+      return `string:${target.trim().toLowerCase()}`;
+    }
+    switch (target.kind) {
+      case "intercom-session":
+        return `intercom:${target.intercomSessionId.trim().toLowerCase()}`;
+      case "pi-session":
+        return `pi:${target.piSessionId.trim().toLowerCase()}`;
+      case "identity-snapshot":
+        return `snapshot:${target.intercomSessionId.trim().toLowerCase()}:${target.piSessionId.trim().toLowerCase()}:${target.reconnect}`;
+      case "scoped-alias":
+        return `scoped:${target.alias.trim().toLowerCase()}@${target.namespace.trim().toLowerCase()}`;
+      case "global-alias":
+        return `global:${target.alias.trim().toLowerCase()}`;
+    }
   }
   function targetsEquivalent(left: string | SendTargetEnvelope, right: string | SendTargetEnvelope): boolean {
-    if (typeof left === "string" && typeof right === "string") {
-      return left.trim().toLowerCase() === right.trim().toLowerCase();
+    return targetIdentityKey(left) === targetIdentityKey(right);
+  }
+  function buildManualAliasTargetEnvelope(to: string, options?: { namespace?: string; global?: boolean }): SendTargetEnvelope {
+    const alias = to.trim();
+    if (!alias) {
+      throw new Error("Invalid manual alias target");
     }
-    if (typeof left === "string") {
-      const normalized = left.trim().toLowerCase();
-      return normalized === right.intercomSessionId?.trim().toLowerCase()
-        || normalized === right.piSessionId?.trim().toLowerCase()
-        || normalized === right.alias?.trim().toLowerCase();
+    if (options?.global || !options?.namespace) {
+      return { kind: "global-alias", alias };
     }
-    if (typeof right === "string") {
-      return targetsEquivalent(right, left);
+    return { kind: "scoped-alias", alias, namespace: options.namespace };
+  }
+  function parseManualAliasInput(to: string): { alias: string; global: boolean } {
+    const trimmed = to.trim();
+    const globalPrefix = "global:";
+    if (trimmed.toLowerCase().startsWith(globalPrefix)) {
+      const alias = trimmed.slice(globalPrefix.length).trim();
+      if (!alias) {
+        throw new Error("Global alias target is missing alias text.");
+      }
+      return { alias, global: true };
     }
-    return left.intercomSessionId?.trim().toLowerCase() === right.intercomSessionId?.trim().toLowerCase()
-      && left.piSessionId?.trim().toLowerCase() === right.piSessionId?.trim().toLowerCase()
-      && left.alias?.trim().toLowerCase() === right.alias?.trim().toLowerCase();
+    if (!trimmed) {
+      throw new Error("Invalid target");
+    }
+    return { alias: trimmed, global: false };
   }
   async function resolveTargetForManualRelay(
     activeClient: IntercomClient,
     to: string,
     waitForReadyMs: number,
-  ): Promise<{ target: string | SendTargetEnvelope; session: SessionInfo | null }> {
+  ): Promise<{ target: SendTargetEnvelope; session: SessionInfo | null }> {
+    const aliasInput = parseManualAliasInput(to);
     const deadline = Date.now() + Math.max(0, waitForReadyMs);
     while (true) {
-      const session = await findSessionByNameOrId(activeClient, to);
-      if (!session) {
-        if (Date.now() >= deadline) return { target: to, session: null };
-      } else if (isSessionReadyForRelay(session)) {
-        return { target: buildSessionTargetEnvelope(session), session };
-      } else if (Date.now() >= deadline) {
-        return { target: buildSessionTargetEnvelope(session), session };
+      if (aliasInput.global) {
+        const sessions = await activeClient.listSessions();
+        const candidates = sessions.filter((session) => session.alias.toLowerCase() === aliasInput.alias.toLowerCase());
+        const candidate = candidates.length === 1 ? (candidates[0] ?? null) : null;
+        if (!candidate) {
+          if (Date.now() >= deadline) {
+            return { target: buildManualAliasTargetEnvelope(aliasInput.alias, { global: true }), session: null };
+          }
+        } else if (isSessionReadyForRelay(candidate)) {
+          return { target: buildManualAliasTargetEnvelope(aliasInput.alias, { global: true }), session: candidate };
+        } else if (Date.now() >= deadline) {
+          return { target: buildManualAliasTargetEnvelope(aliasInput.alias, { global: true }), session: candidate };
+        }
+      } else {
+        const resolved = await findSessionByNameOrId(activeClient, aliasInput.alias);
+        if (!resolved.session) {
+          if (Date.now() >= deadline) {
+            return {
+              target: buildManualAliasTargetEnvelope(aliasInput.alias, { namespace: resolved.currentNamespace }),
+              session: null,
+            };
+          }
+        } else {
+          const target = resolved.matchedBy === "intercom-session"
+            ? { kind: "intercom-session", intercomSessionId: resolved.session.id } satisfies SendTargetEnvelope
+            : resolved.matchedBy === "pi-session"
+              ? { kind: "pi-session", piSessionId: resolved.session.piSessionId } satisfies SendTargetEnvelope
+              : buildManualAliasTargetEnvelope(aliasInput.alias, { namespace: resolved.currentNamespace ?? resolved.session.namespace });
+
+          if (isSessionReadyForRelay(resolved.session)) {
+            return { target, session: resolved.session };
+          }
+          if (Date.now() >= deadline) {
+            return { target, session: resolved.session };
+          }
+        }
       }
 
       await new Promise<void>((resolve) => {
@@ -1296,30 +1456,29 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       alias: resolvedSession.alias,
     };
   }
-  function resolveReplySessionCandidate(sessions: SessionInfo[], originalSender: SessionInfo): SessionInfo | null {
-    const byIntercomId = sessions.find((session) => session.id === originalSender.id);
-    if (byIntercomId) return byIntercomId;
-    if (originalSender.piSessionId) {
-      const byPiSession = sessions.filter((session) => session.piSessionId === originalSender.piSessionId);
-      if (byPiSession.length === 1) return byPiSession[0] ?? null;
-    }
-    return null;
-  }
   async function resolveTargetForReplyRelay(
     activeClient: IntercomClient,
-    originalSender: SessionInfo,
+    replyTarget: IdentitySnapshotTarget,
     waitForReadyMs: number,
-  ): Promise<{ target: string | SendTargetEnvelope; session: SessionInfo | null }> {
+  ): Promise<{ target: IdentitySnapshotTarget; session: SessionInfo | null }> {
     const deadline = Date.now() + Math.max(0, waitForReadyMs);
     while (true) {
       const sessions = await activeClient.listSessions();
-      const candidate = resolveReplySessionCandidate(sessions, originalSender);
+      const candidate = sessions.find((session) => session.id === replyTarget.intercomSessionId)
+        ?? (
+          replyTarget.reconnect === "same-pi-session-if-unique"
+            ? (() => {
+              const byPi = sessions.filter((session) => session.piSessionId === replyTarget.piSessionId);
+              return byPi.length === 1 ? byPi[0] ?? null : null;
+            })()
+            : null
+        );
       if (!candidate) {
         if (Date.now() >= deadline) throw new Error("expired-target");
       } else if (isSessionReadyForRelay(candidate)) {
-        return { target: buildSessionTargetEnvelope(candidate), session: candidate };
+        return { target: replyTarget, session: candidate };
       } else if (Date.now() >= deadline) {
-        return { target: buildSessionTargetEnvelope(candidate), session: candidate };
+        return { target: replyTarget, session: candidate };
       }
       await new Promise<void>((resolve) => {
         runtimeScheduler.setTimeout(resolve, READY_WAIT_POLL_MS);
@@ -1361,7 +1520,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       throw new Error(`Unsafe supervisor routing: broker self piSessionId mismatch (broker=${piSessionId}, runtime=${requestedPiSessionId})`);
     }
 
-    const alias = ownSession.alias.trim() || buildPresenceIdentity(pi, currentSessionId).name;
+    const alias = ownSession.alias.trim() || deriveRoutingAlias(pi, currentSessionId);
     const cwd = ownSession.cwd?.trim() || liveContext.cwd || process.cwd();
 
     return {
@@ -1394,11 +1553,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       bodyText: messageText,
     }, "trigger");
   }
-  function recordSubagentDeliveryError(entryType: string, to: string | SendTargetEnvelope, message: string, error: unknown): void {
+  function recordSubagentDeliveryError(entryType: string, to: string | SendTargetEnvelope, error: unknown): void {
     pi.appendEntry(entryType, {
       to: formatRelayTarget(to),
-      target: typeof to === "string" ? { alias: to } : to,
-      message,
+      target: typeof to === "string" ? { kind: "global-alias", alias: to } : to,
       error: getErrorMessage(error),
       timestamp: Date.now(),
     });
@@ -1427,9 +1585,12 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
         return;
       }
       const relayLocator = toSubagentLocator(parsed);
-      if ((typeof parsed.to === "string" || (!parsed.to.intercomSessionId && !parsed.to.piSessionId)) && !relayLocator) {
+      const parsedTargetIsAlias = typeof parsed.to === "string"
+        || parsed.to.kind === "scoped-alias"
+        || parsed.to.kind === "global-alias";
+      if (parsedTargetIsAlias && !relayLocator) {
         const error = new Error("unsafe-machine-alias-target");
-        recordSubagentDeliveryError(options.errorEntryType, parsed.to, parsed.message, error);
+        recordSubagentDeliveryError(options.errorEntryType, parsed.to, error);
         if (options.acknowledge) emitResultDelivery(parsed.requestId, false, error);
         return;
       }
@@ -1444,7 +1605,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
         activeClient = await ensureConnected("background");
       } catch (error) {
         if (!relayStillLive()) return;
-        recordSubagentDeliveryError(options.errorEntryType, parsed.to, parsed.message, error);
+        recordSubagentDeliveryError(options.errorEntryType, parsed.to, error);
         if (options.acknowledge) emitResultDelivery(parsed.requestId, false, error);
         return;
       }
@@ -1457,7 +1618,8 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
         const locator = relayLocator;
         const strictMachineRelay = parsed.source === "async-resume";
         const targetNeedsLookup = typeof parsed.to === "string"
-          || (!parsed.to.intercomSessionId && !parsed.to.piSessionId);
+          || parsed.to.kind === "scoped-alias"
+          || parsed.to.kind === "global-alias";
 
         if (strictMachineRelay && !locator) {
           throw new Error("Async resume relay missing strict subagent locator metadata.");
@@ -1470,26 +1632,33 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
             throw new Error(`Live subagent target not ready after ${waitForReadyMs}ms (run=${locator.runId}, agent=${locator.agent}, index=${locator.index}).`);
           }
           sendTarget = {
+            kind: "identity-snapshot",
             intercomSessionId: liveSession.id,
-            ...(liveSession.piSessionId ? { piSessionId: liveSession.piSessionId } : {}),
+            piSessionId: liveSession.piSessionId,
+            reconnect: "same-pi-session-if-unique",
+            ...(liveSession.alias ? { alias: liveSession.alias } : {}),
           };
         }
 
-        if (typeof sendTarget === "string" || (!sendTarget.intercomSessionId && !sendTarget.piSessionId)) {
+        if (
+          typeof sendTarget === "string"
+          || sendTarget.kind === "scoped-alias"
+          || sendTarget.kind === "global-alias"
+        ) {
           throw new Error("unsafe-machine-alias-target");
         }
-        const result = await activeClient.send(sendTarget, { text: parsed.message, origin: "machine" });
+        const result = await activeClient.sendMachine(sendTarget, { text: parsed.message });
         if (!relayStillLive()) return;
         if (!result.delivered) {
-          const error = new Error(result.reason ?? "Session may not exist or has disconnected.");
-          recordSubagentDeliveryError(options.errorEntryType, sendTarget, parsed.message, error);
+          const error = new Error(result.failure ? formatDeliveryFailure(result.failure) : "Message not delivered.");
+          recordSubagentDeliveryError(options.errorEntryType, sendTarget, error);
           if (options.acknowledge) emitResultDelivery(parsed.requestId, false, error);
           return;
         }
         if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
       } catch (error) {
         if (!relayStillLive()) return;
-        recordSubagentDeliveryError(options.errorEntryType, parsed.to, parsed.message, error);
+        recordSubagentDeliveryError(options.errorEntryType, parsed.to, error);
         if (options.acknowledge) emitResultDelivery(parsed.requestId, false, error);
       }
     })();
@@ -1565,6 +1734,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     runtimeContext = null;
     currentSessionId = null;
     sessionStartedAt = null;
+    registeredRoutingAlias = null;
   });
   pi.on("turn_end", () => {
     if (!getLiveContext()) {
@@ -1609,7 +1779,6 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       return;
     }
     currentSessionId = ctx.sessionManager.getSessionId();
-    syncPresenceIdentity(ctx.sessionManager.getSessionId());
     replyTracker.beginTurn();
   });
   pi.on("model_select", (event, ctx) => {
@@ -1619,7 +1788,6 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     currentModel = event.model.id;
     if (client) {
       client.updatePresence({
-        ...buildPresenceIdentity(pi, ctx.sessionManager.getSessionId()),
         model: event.model.id,
         status: currentStatus(),
       });
@@ -1703,7 +1871,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
           };
         }
 
-        syncPresenceIdentity(ctx.sessionManager.getSessionId());
+        syncPresenceStatus();
 
         if (signal?.aborted) {
           return {
@@ -1719,13 +1887,15 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
           return {
             content: [{ type: "text", text: "Supervisor intercom target is unavailable. Exact supervisor identity is required." }],
             isError: true,
-            details: { error: true, reason: "unsafe-machine-alias-target" },
+            details: { error: true, failure: { code: "unsafe-machine-alias-target" } },
           };
         }
-        const sendTo = {
+        const sendTo: SendTargetEnvelope = {
+          kind: "identity-snapshot",
           intercomSessionId: supervisorTarget.intercomSessionId,
           piSessionId: supervisorTarget.piSessionId,
           alias: supervisorTarget.alias,
+          reconnect: "same-pi-session-if-unique",
         };
         const supervisorTargetLabel = formatSupervisorTargetLabel(supervisorTarget);
         if (signal?.aborted) {
@@ -1746,16 +1916,15 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
         if (reason === "progress_update") {
           const message = params.message as string;
           try {
-            const result = await connectedClient.send(sendTo, {
+            const result = await connectedClient.sendMachine(sendTo, {
               text: formatChildOrchestratorMessage("update", metadata, message),
-              origin: "machine",
             });
             if (!result.delivered) {
-              const errorText = result.reason ?? "Session may not exist or has disconnected.";
+              const errorText = result.failure ? formatDeliveryFailure(result.failure) : "Message not delivered.";
               return {
                 content: [{ type: "text", text: formatSupervisorTargetUnavailableReason(supervisorTarget, errorText) }],
                 isError: true,
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: { messageId: result.id, delivered: false, failure: result.failure },
               };
             }
             pi.appendEntry("intercom_sent", {
@@ -1788,7 +1957,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
           };
         }
 
-        let replyPromise: Promise<Message> | null = null;
+        let replyPromise: Promise<DeliveredMessage> | null = null;
         try {
           const questionId = randomUUID();
           const replySenderMatcher = hasStructuredSupervisorTarget(supervisorTarget)
@@ -1818,14 +1987,13 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
           const requestText = reason === "interview_request"
             ? formatChildOrchestratorMessage("interview", metadata, formatSupervisorInterviewRequest(supervisorInterview!, typeof params.message === "string" ? params.message : undefined))
             : formatChildOrchestratorMessage("ask", metadata, params.message as string);
-          const sendResult = await connectedClient.send(sendTo, {
+          const sendResult = await connectedClient.sendMachine(sendTo, {
             messageId: questionId,
             text: requestText,
             expectsReply: true,
-            origin: "machine",
           });
           if (!sendResult.delivered) {
-            const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
+            const errorText = sendResult.failure ? formatDeliveryFailure(sendResult.failure) : "Message not delivered.";
             rejectReplyWaiter(new Error(formatSupervisorTargetUnavailableReason(supervisorTarget, errorText)));
             if (replyPromise) {
               try {
@@ -1907,7 +2075,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
         if (isPartial) {
           return new Text(theme.fg("warning", "Waiting for supervisor..."), 0, 0);
         }
-        const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; reason?: string; structuredReplyParseError?: string } | undefined;
+        const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; failure?: DeliveryFailure; structuredReplyParseError?: string } | undefined;
         const textContent = firstTextContent(result);
         const failed = Boolean(context.isError || details?.error === true || details?.delivered === false);
         const parseWarning = typeof details?.structuredReplyParseError === "string";
@@ -1933,7 +2101,8 @@ Use this to communicate findings, request help, or coordinate work with other se
 
 Usage:
   intercom({ action: "list" })                    → List active sessions
-  intercom({ action: "send", to: "session-name", message: "..." })  → Send message
+  intercom({ action: "send", to: "session-name", message: "..." })  → Send message (scoped alias by default)
+  intercom({ action: "send", to: "global:session-name", message: "..." }) → Send via global alias lookup
   intercom({ action: "ask", to: "session-name", message: "..." })   → Ask and wait for reply
   intercom({ action: "reply", message: "..." })                      → Reply to the active/single pending ask
   intercom({ action: "send"|"ask"|"reply", waitForReadyMs: 5000, ... }) → Wait for target registration/readiness before failing
@@ -1948,7 +2117,7 @@ Usage:
         description: "Action: 'list', 'send', 'ask', 'reply', 'pending', or 'status'",
       }),
       to: Type.Optional(Type.String({
-        description: "Target session name or ID (for 'send', 'ask', or disambiguating 'reply')",
+        description: "Target session name or ID (for 'send', 'ask', or disambiguating 'reply'). Use 'global:<alias>' for global alias lookup.",
       })),
       message: Type.Optional(Type.String({
         description: "Message to send (for 'send', 'ask', or 'reply' action)",
@@ -1979,7 +2148,7 @@ Usage:
         };
       }
 
-      syncPresenceIdentity(ctx.sessionManager.getSessionId());
+      syncPresenceStatus();
 
       const { action, to, message, attachments, replyTo, waitForReadyMs } = params;
       if (waitForReadyMs !== undefined && (!Number.isFinite(waitForReadyMs) || waitForReadyMs < 0)) {
@@ -2059,12 +2228,12 @@ Usage:
                 };
               }
             }
-            let result = await connectedClient.send(resolved.target, {
+            let result = await connectedClient.sendManual(resolved.target, {
               text: message,
               attachments,
               replyTo,
             });
-            if (!result.delivered && isRetryableDeliveryReason(result.reason)) {
+            if (!result.delivered && isRetryableDeliveryFailure(result.failure)) {
               const refreshed = await resolveTargetForManualRelay(connectedClient, to, readinessWaitMs);
               if (!targetsEquivalent(refreshed.target, resolved.target) || refreshed.session) {
                 resolved = refreshed;
@@ -2075,7 +2244,7 @@ Usage:
                     details: { error: true },
                   };
                 }
-                result = await connectedClient.send(resolved.target, {
+                result = await connectedClient.sendManual(resolved.target, {
                   text: message,
                   attachments,
                   replyTo,
@@ -2083,17 +2252,17 @@ Usage:
               }
             }
             if (!result.delivered) {
-              const errorText = result.reason ?? "Session may not exist or has disconnected.";
-              recordResolutionFailure("send", to, errorText);
+              const errorText = result.failure ? formatDeliveryFailure(result.failure) : "Message not delivered.";
+              recordResolutionFailure("send", to, { failure: result.failure, message: errorText });
               return {
                 content: [{ type: "text", text: `Message to "${to}" was not delivered: ${errorText}` }],
                 isError: true,
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: { messageId: result.id, delivered: false, failure: result.failure },
               };
             }
             pi.appendEntry("intercom_sent", {
               to: resolved.session?.alias || to,
-              target: typeof resolved.target === "string" ? { alias: resolved.target } : resolved.target,
+              target: resolved.target,
               message: { text: message, attachments, replyTo },
               messageId: result.id,
               timestamp: Date.now(),
@@ -2139,7 +2308,7 @@ Usage:
               details: { error: true },
             };
           }
-          let replyPromise: Promise<Message> | null = null;
+          let replyPromise: Promise<DeliveredMessage> | null = null;
 
           try {
             const readinessWaitMs = waitForReadyMs ?? DEFAULT_MANUAL_ASK_READY_WAIT_MS;
@@ -2160,7 +2329,7 @@ Usage:
             }
             const questionId = randomUUID();
             replyPromise = waitForReply(replyMatcherForResolvedTarget(to, resolved.session), questionId, _signal);
-            let sendResult = await connectedClient.send(resolved.target, {
+            let sendResult = await connectedClient.sendManual(resolved.target, {
               messageId: questionId,
               text: message,
               attachments,
@@ -2168,7 +2337,7 @@ Usage:
               expectsReply: true,
             });
 
-            if (!sendResult.delivered && isRetryableDeliveryReason(sendResult.reason)) {
+            if (!sendResult.delivered && isRetryableDeliveryFailure(sendResult.failure)) {
               const refreshed = await resolveTargetForManualRelay(connectedClient, to, readinessWaitMs);
               if (!targetsEquivalent(refreshed.target, resolved.target) || refreshed.session) {
                 rejectReplyWaiter(new Error("Refreshing intercom target after delivery failure."));
@@ -2188,7 +2357,7 @@ Usage:
                   };
                 }
                 replyPromise = waitForReply(replyMatcherForResolvedTarget(to, resolved.session), questionId, _signal);
-                sendResult = await connectedClient.send(resolved.target, {
+                sendResult = await connectedClient.sendManual(resolved.target, {
                   messageId: questionId,
                   text: message,
                   attachments,
@@ -2199,8 +2368,8 @@ Usage:
             }
 
             if (!sendResult.delivered) {
-              const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-              recordResolutionFailure("ask", to, errorText);
+              const errorText = sendResult.failure ? formatDeliveryFailure(sendResult.failure) : "Message not delivered.";
+              recordResolutionFailure("ask", to, { failure: sendResult.failure, message: errorText });
               rejectReplyWaiter(new Error(`Message to "${to}" was not delivered: ${errorText}`));
               if (replyPromise) {
                 try {
@@ -2217,7 +2386,7 @@ Usage:
             }
             pi.appendEntry("intercom_sent", {
               to: resolved.session?.alias || to,
-              target: typeof resolved.target === "string" ? { alias: resolved.target } : resolved.target,
+              target: resolved.target,
               message: { text: message, attachments, replyTo },
               messageId: sendResult.id,
               timestamp: Date.now(),
@@ -2266,7 +2435,7 @@ Usage:
           try {
             const target = replyTracker.resolveReplyTarget({ replyTo });
             const readinessWaitMs = waitForReadyMs ?? DEFAULT_MANUAL_REPLY_READY_WAIT_MS;
-            let resolved = await resolveTargetForReplyRelay(connectedClient, target.from, readinessWaitMs);
+            let resolved = await resolveTargetForReplyRelay(connectedClient, target.replyTarget, readinessWaitMs);
             if (currentSessionTargetMatches(resolved.target, connectedClient)) {
               return {
                 content: [{ type: "text", text: "Cannot message the current session" }],
@@ -2274,12 +2443,12 @@ Usage:
                 details: { error: true },
               };
             }
-            let result = await connectedClient.send(resolved.target, {
+            let result = await connectedClient.sendManual(resolved.target, {
               text: message,
               replyTo: target.message.id,
             });
-            if (!result.delivered && isRetryableDeliveryReason(result.reason)) {
-              const refreshed = await resolveTargetForReplyRelay(connectedClient, target.from, readinessWaitMs);
+            if (!result.delivered && isRetryableDeliveryFailure(result.failure)) {
+              const refreshed = await resolveTargetForReplyRelay(connectedClient, target.replyTarget, readinessWaitMs);
               if (!targetsEquivalent(refreshed.target, resolved.target) || refreshed.session) {
                 resolved = refreshed;
                 if (currentSessionTargetMatches(resolved.target, connectedClient)) {
@@ -2289,25 +2458,25 @@ Usage:
                     details: { error: true },
                   };
                 }
-                result = await connectedClient.send(resolved.target, {
+                result = await connectedClient.sendManual(resolved.target, {
                   text: message,
                   replyTo: target.message.id,
                 });
               }
             }
             if (!result.delivered) {
-              const errorText = result.reason ?? "Session may not exist or has disconnected.";
-              recordResolutionFailure("reply", target.from.id, errorText);
+              const errorText = result.failure ? formatDeliveryFailure(result.failure) : "Message not delivered.";
+              recordResolutionFailure("reply", target.from.id, { failure: result.failure, message: errorText });
               return {
                 content: [{ type: "text", text: `Reply to "${resolved.session?.alias || target.from.alias || target.from.id}" was not delivered: ${errorText}` }],
                 isError: true,
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: { messageId: result.id, delivered: false, failure: result.failure },
               };
             }
             replyTracker.markReplied(target.message.id);
             pi.appendEntry("intercom_sent", {
               to: resolved.session?.alias || target.from.alias || target.from.id,
-              target: typeof resolved.target === "string" ? { alias: resolved.target } : resolved.target,
+              target: resolved.target,
               message: { text: message, replyTo: target.message.id },
               messageId: result.id,
               timestamp: Date.now(),
@@ -2356,7 +2525,9 @@ Usage:
             const recentDrops = droppedMisrouteDiagnostics.slice(-5);
             const recentResolutionFailures = resolutionFailureDiagnostics.slice(-5);
             const dropLines = recentDrops.map((drop) => `- ${drop.reason} ${drop.messageId} to.pi=${drop.intendedPiSessionId ?? "-"} local.pi=${drop.actualPiSessionId}`).join("\n");
-            const failureLines = recentResolutionFailures.map((failure) => `- ${failure.action} ${failure.reason}`).join("\n");
+            const failureLines = recentResolutionFailures
+              .map((failure) => `- ${failure.action} ${failure.failureCode ?? "error"} ${failure.message}`)
+              .join("\n");
             return {
               content: [{
                 type: "text",
@@ -2411,15 +2582,15 @@ Usage:
       if (isPartial) {
         return new Text(theme.fg("warning", "Intercom working..."), 0, 0);
       }
-      const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; reason?: string } | undefined;
+      const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; failure?: DeliveryFailure } | undefined;
       const failed = Boolean(context.isError || details?.error === true || details?.delivered === false);
       let text = failed ? theme.fg("error", "✗ ") : theme.fg("success", "✓ ");
       text += theme.fg(failed ? "error" : "text", firstTextContent(result));
       if (details?.messageId && !context.expanded) {
         text += theme.fg("dim", ` (${details.messageId.slice(0, 8)})`);
       }
-      if (details?.reason && context.expanded) {
-        text += "\n" + theme.fg("dim", `Reason: ${details.reason}`);
+      if (details?.failure && context.expanded) {
+        text += "\n" + theme.fg("dim", `Failure: ${details.failure.code} — ${formatDeliveryFailure(details.failure)}`);
       }
       return new Text(text, 0, 0);
     },
@@ -2439,7 +2610,7 @@ Usage:
     }
     if (!getLiveContext(ctx, overlayGeneration)) return;
 
-    syncPresenceIdentity(ctx.sessionManager.getSessionId());
+    syncPresenceStatus();
 
     let currentSession: SessionInfo;
     let sessions: SessionInfo[];

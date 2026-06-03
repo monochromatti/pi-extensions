@@ -3,184 +3,86 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerSocketPath } from "./paths.ts";
+import { decodeBrokerFrame } from "./protocol.ts";
 import type {
+  Attachment,
+  BrokerMessage,
+  DeliveryFailure,
+  IntercomMessageOrigin,
+  MachineIntercomTarget,
+  ManualIntercomTarget,
+  OutboundMessage,
   SessionInfo,
   SessionReadiness,
   SessionSubagentMetadata,
-  Message,
-  Attachment,
-  SendTargetEnvelope,
 } from "../types.ts";
 
-interface SendOptions {
+interface BaseSendOptions {
   text: string;
   attachments?: Attachment[];
   replyTo?: string;
   expectsReply?: boolean;
   messageId?: string;
-  origin?: "manual" | "machine";
 }
+
 
 interface SendResult {
   id: string;
   delivered: boolean;
-  reason?: string;
+  failure?: DeliveryFailure;
 }
+
+type SendTargetInput = string | ManualIntercomTarget;
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-function isAttachment(value: unknown): value is Attachment {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const attachment = value as Record<string, unknown>;
-
-  if (
-    attachment.type !== "file"
-    && attachment.type !== "snippet"
-    && attachment.type !== "context"
-  ) {
-    return false;
-  }
-
-  if (typeof attachment.name !== "string" || typeof attachment.content !== "string") {
-    return false;
-  }
-
-  return attachment.language === undefined || typeof attachment.language === "string";
-}
-
-function isMessage(value: unknown): value is Message {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const message = value as Record<string, unknown>;
-
-  if (typeof message.id !== "string" || typeof message.timestamp !== "number") {
-    return false;
-  }
-
-  if (message.to !== undefined) {
-    if (typeof message.to !== "object" || message.to === null) {
-      return false;
-    }
-    const to = message.to as Record<string, unknown>;
-    if (to.intercomSessionId !== undefined && typeof to.intercomSessionId !== "string") {
-      return false;
-    }
-    if (to.piSessionId !== undefined && typeof to.piSessionId !== "string") {
-      return false;
-    }
-    if (to.alias !== undefined && typeof to.alias !== "string") {
-      return false;
-    }
-    if (to.namespace !== undefined && typeof to.namespace !== "string") {
-      return false;
-    }
-    if (to.global !== undefined && typeof to.global !== "boolean") {
-      return false;
-    }
-  }
-
-  if (message.replyTo !== undefined && typeof message.replyTo !== "string") {
-    return false;
-  }
-
-  if (message.expectsReply !== undefined && typeof message.expectsReply !== "boolean") {
-    return false;
-  }
-
-  if (typeof message.content !== "object" || message.content === null) {
-    return false;
-  }
-
-  const content = message.content as Record<string, unknown>;
-  if (typeof content.text !== "string") {
-    return false;
-  }
-
-  return content.attachments === undefined
-    || (Array.isArray(content.attachments) && content.attachments.every(isAttachment));
-}
-
-function isSessionReadiness(value: unknown): value is SessionReadiness {
+function isManualIntercomTarget(value: unknown): value is ManualIntercomTarget {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
-  const readiness = value as Record<string, unknown>;
-  if (
-    readiness.state !== "initializing"
-    && readiness.state !== "ready"
-    && readiness.state !== "stopping"
-  ) {
-    return false;
-  }
-  if (readiness.reason !== undefined && typeof readiness.reason !== "string") {
-    return false;
-  }
-  return typeof readiness.updatedAt === "number";
+  const record = value as { kind?: unknown };
+  return record.kind === "intercom-session"
+    || record.kind === "pi-session"
+    || record.kind === "identity-snapshot"
+    || record.kind === "scoped-alias"
+    || record.kind === "global-alias";
 }
 
-function isSessionSubagentMetadata(value: unknown): value is SessionSubagentMetadata {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const subagent = value as Record<string, unknown>;
-  return typeof subagent.ownerPiSessionId === "string"
-    && typeof subagent.runId === "string"
-    && typeof subagent.agent === "string"
-    && typeof subagent.index === "number"
-    && Number.isInteger(subagent.index)
-    && subagent.index >= 0;
+function isMachineIntercomTarget(value: ManualIntercomTarget): value is MachineIntercomTarget {
+  return value.kind === "intercom-session"
+    || value.kind === "pi-session"
+    || value.kind === "identity-snapshot";
 }
 
-function isSessionInfo(value: unknown): value is SessionInfo {
-  if (typeof value !== "object" || value === null) {
-    return false;
+function normalizeSendTarget(target: SendTargetInput, namespace: string | null): ManualIntercomTarget {
+  if (typeof target === "string") {
+    const normalized = target.trim();
+    if (!normalized) {
+      throw new Error("Invalid send target");
+    }
+    const globalPrefix = "global:";
+    if (normalized.toLowerCase().startsWith(globalPrefix)) {
+      const alias = normalized.slice(globalPrefix.length).trim();
+      if (!alias) {
+        throw new Error("Invalid send target");
+      }
+      return { kind: "global-alias", alias };
+    }
+
+    if (namespace) {
+      return { kind: "scoped-alias", alias: normalized, namespace };
+    }
+
+    return { kind: "global-alias", alias: normalized };
   }
 
-  const session = value as Record<string, unknown>;
-
-  if (
-    typeof session.id !== "string"
-    || typeof session.cwd !== "string"
-    || typeof session.model !== "string"
-    || typeof session.pid !== "number"
-    || typeof session.startedAt !== "number"
-    || typeof session.lastActivity !== "number"
-  ) {
-    return false;
+  if (!isManualIntercomTarget(target)) {
+    throw new Error("Invalid send target");
   }
 
-  if (typeof session.alias !== "string" || session.alias.trim() === "") {
-    return false;
-  }
-
-  if (typeof session.namespace !== "string" || session.namespace.trim() === "") {
-    return false;
-  }
-
-  if (typeof session.piSessionId !== "string" || session.piSessionId.trim() === "") {
-    return false;
-  }
-  if (typeof session.leaseTtlMs !== "number" || !Number.isFinite(session.leaseTtlMs) || session.leaseTtlMs < 0) {
-    return false;
-  }
-  if (typeof session.heartbeatIntervalMs !== "number" || !Number.isFinite(session.heartbeatIntervalMs) || session.heartbeatIntervalMs < 0) {
-    return false;
-  }
-  if (session.readiness !== undefined && !isSessionReadiness(session.readiness)) {
-    return false;
-  }
-  if (session.subagent !== undefined && !isSessionSubagentMetadata(session.subagent)) {
-    return false;
-  }
-
-  return session.status === undefined || typeof session.status === "string";
+  return target;
 }
 
 export class IntercomClient extends EventEmitter {
@@ -188,6 +90,7 @@ export class IntercomClient extends EventEmitter {
   private _sessionId: string | null = null;
   private pendingSends = new Map<string, { resolve: (r: SendResult) => void; reject: (e: Error) => void }>();
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
+  private connectedNamespace: string | null = null;
   private disconnecting = false;
   private disconnectError: Error | null = null;
 
@@ -237,6 +140,7 @@ export class IntercomClient extends EventEmitter {
       const socket = net.connect(getBrokerSocketPath());
       this.socket = socket;
       this.disconnectError = null;
+      this.connectedNamespace = session.namespace;
       let settled = false;
       const timeout = setTimeout(() => {
         if (!this._sessionId) {
@@ -282,6 +186,7 @@ export class IntercomClient extends EventEmitter {
           this.socket = null;
         }
         this._sessionId = null;
+        this.connectedNamespace = null;
         this.disconnectError = null;
         if (connectionEstablished && !wasDisconnecting) {
           this.emit("disconnected", disconnectError);
@@ -347,11 +252,7 @@ export class IntercomClient extends EventEmitter {
   }
 
   private handleBrokerMessage(msg: unknown): void {
-    if (typeof msg !== "object" || msg === null || !("type" in msg) || typeof msg.type !== "string") {
-      throw new Error("Invalid broker message");
-    }
-
-    const brokerMessage = msg as { type: string } & Record<string, unknown>;
+    const brokerMessage: BrokerMessage = decodeBrokerFrame(msg);
 
     if (this._sessionId === null && brokerMessage.type !== "registered") {
       throw new Error(`Received ${brokerMessage.type} before registered`);
@@ -359,10 +260,6 @@ export class IntercomClient extends EventEmitter {
 
     switch (brokerMessage.type) {
       case "registered": {
-        if (typeof brokerMessage.sessionId !== "string") {
-          throw new Error("Invalid registered message");
-        }
-
         if (this._sessionId !== null) {
           throw new Error("Received duplicate registered message");
         }
@@ -373,104 +270,65 @@ export class IntercomClient extends EventEmitter {
       }
 
       case "sessions": {
-        const { requestId, sessions } = brokerMessage;
-        if (typeof requestId !== "string" || !Array.isArray(sessions) || !sessions.every(isSessionInfo)) {
-          throw new Error("Invalid sessions message");
-        }
-
-        const pending = this.pendingLists.get(requestId);
+        const pending = this.pendingLists.get(brokerMessage.requestId);
         if (!pending) {
           // Late list responses can still arrive after the caller has already timed out.
           return;
         }
 
-        this.pendingLists.delete(requestId);
-        pending.resolve(sessions);
+        this.pendingLists.delete(brokerMessage.requestId);
+        pending.resolve(brokerMessage.sessions);
         break;
       }
 
       case "message": {
-        const { from, message } = brokerMessage;
-        if (!isSessionInfo(from) || !isMessage(message)) {
-          throw new Error("Invalid message event");
-        }
-
-        this.emit("message", from, message);
+        this.emit("message", brokerMessage.from, brokerMessage.message);
         break;
       }
 
       case "delivered": {
-        const { messageId } = brokerMessage;
-        if (typeof messageId !== "string") {
-          throw new Error("Invalid delivered message");
-        }
-
-        const pending = this.pendingSends.get(messageId);
+        const pending = this.pendingSends.get(brokerMessage.messageId);
         if (!pending) {
           // Late send responses are harmless once the caller has already timed out.
           return;
         }
 
-        this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: true });
+        this.pendingSends.delete(brokerMessage.messageId);
+        pending.resolve({ id: brokerMessage.messageId, delivered: true });
         break;
       }
 
       case "delivery_failed": {
-        const { messageId, reason } = brokerMessage;
-        if (typeof messageId !== "string" || typeof reason !== "string") {
-          throw new Error("Invalid delivery_failed message");
-        }
-
-        const pending = this.pendingSends.get(messageId);
+        const pending = this.pendingSends.get(brokerMessage.messageId);
         if (!pending) {
           // Late send responses are harmless once the caller has already timed out.
           return;
         }
 
-        this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: false, reason });
+        this.pendingSends.delete(brokerMessage.messageId);
+        pending.resolve({ id: brokerMessage.messageId, delivered: false, failure: brokerMessage.failure });
         break;
       }
 
       case "session_joined": {
-        if (!isSessionInfo(brokerMessage.session)) {
-          throw new Error("Invalid session_joined message");
-        }
-
         this.emit("session_joined", brokerMessage.session);
         break;
       }
 
       case "session_left": {
-        if (typeof brokerMessage.sessionId !== "string") {
-          throw new Error("Invalid session_left message");
-        }
-
         this.emit("session_left", brokerMessage.sessionId);
         break;
       }
 
       case "presence_update": {
-        if (!isSessionInfo(brokerMessage.session)) {
-          throw new Error("Invalid presence_update message");
-        }
-
         this.emit("presence_update", brokerMessage.session);
         break;
       }
 
       case "error": {
-        if (typeof brokerMessage.error !== "string") {
-          throw new Error("Invalid error message");
-        }
-
         this.emit("error", new Error(brokerMessage.error));
         break;
       }
-
-      default:
-        throw new Error(`Unknown broker message type: ${brokerMessage.type}`);
     }
   }
 
@@ -552,16 +410,24 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
-  send(to: string | SendTargetEnvelope, options: SendOptions): Promise<SendResult> {
+  sendManual(to: string | ManualIntercomTarget, options: BaseSendOptions): Promise<SendResult> {
     let socket: net.Socket;
     try {
       socket = this.requireActiveSocket();
     } catch (error) {
       return Promise.reject(toError(error));
     }
-    
+
     const messageId = options.messageId ?? randomUUID();
-    const message: Message = {
+
+    let normalizedTarget: ManualIntercomTarget;
+    try {
+      normalizedTarget = normalizeSendTarget(to, this.connectedNamespace);
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+
+    const message: OutboundMessage = {
       id: messageId,
       timestamp: Date.now(),
       replyTo: options.replyTo,
@@ -572,6 +438,46 @@ export class IntercomClient extends EventEmitter {
       },
     };
 
+    return this.sendWithOrigin(socket, normalizedTarget, "manual", message);
+  }
+
+  sendMachine(to: MachineIntercomTarget, options: BaseSendOptions): Promise<SendResult> {
+    let socket: net.Socket;
+    try {
+      socket = this.requireActiveSocket();
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+
+    if (!isMachineIntercomTarget(to)) {
+      return Promise.resolve({
+        id: options.messageId ?? randomUUID(),
+        delivered: false,
+        failure: { code: "unsafe-machine-alias-target" },
+      });
+    }
+
+    const message: OutboundMessage = {
+      id: options.messageId ?? randomUUID(),
+      timestamp: Date.now(),
+      replyTo: options.replyTo,
+      expectsReply: options.expectsReply,
+      content: {
+        text: options.text,
+        attachments: options.attachments,
+      },
+    };
+
+    return this.sendWithOrigin(socket, to, "machine", message);
+  }
+
+  private sendWithOrigin(
+    socket: net.Socket,
+    to: ManualIntercomTarget,
+    origin: IntercomMessageOrigin,
+    message: OutboundMessage,
+  ): Promise<SendResult> {
+    const messageId = message.id;
     return new Promise((resolve, reject) => {
       const wrappedResolve = (result: SendResult) => {
         clearTimeout(timeout);
@@ -594,8 +500,7 @@ export class IntercomClient extends EventEmitter {
           type: "send",
           to,
           message,
-          ...(options.origin !== undefined ? { origin: options.origin } : {}),
-          ...((options as { from?: unknown }).from !== undefined ? { from: (options as { from?: unknown }).from } : {}),
+          origin,
         });
       } catch (error) {
         clearTimeout(timeout);
@@ -617,7 +522,6 @@ export class IntercomClient extends EventEmitter {
   }
 
   updatePresence(updates: {
-    name?: string;
     status?: string;
     model?: string;
     readiness?: SessionReadiness;

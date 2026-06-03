@@ -1,13 +1,27 @@
-import type { Message, SessionInfo } from "./types.ts";
+import type { DeliveredMessage, IdentitySnapshotReconnectPolicy, IdentitySnapshotTarget, SessionInfo } from "./types.ts";
 
 export interface IntercomContext {
   from: SessionInfo;
-  message: Message;
+  message: DeliveredMessage;
   receivedAt: number;
+  replyTarget: IdentitySnapshotTarget;
 }
 
 function contextLabel(context: IntercomContext): string {
   return `${context.message.id} from ${context.from.alias ?? context.from.id} (${context.from.id})`;
+}
+
+function buildReplyTarget(
+  from: SessionInfo,
+  reconnect: IdentitySnapshotReconnectPolicy,
+): IdentitySnapshotTarget {
+  return {
+    kind: "identity-snapshot",
+    intercomSessionId: from.id,
+    piSessionId: from.piSessionId,
+    reconnect,
+    ...(from.alias ? { alias: from.alias } : {}),
+  };
 }
 
 export class ReplyTracker {
@@ -17,8 +31,13 @@ export class ReplyTracker {
 
   constructor(private readonly askTimeoutMs = 10 * 60 * 1000) {}
 
-  recordIncomingMessage(from: SessionInfo, message: Message, receivedAt = Date.now()): IntercomContext {
-    const context = { from, message, receivedAt };
+  recordIncomingMessage(
+    from: SessionInfo,
+    message: DeliveredMessage,
+    receivedAt = Date.now(),
+    reconnect: IdentitySnapshotReconnectPolicy = "same-pi-session-if-unique",
+  ): IntercomContext {
+    const context = { from, message, receivedAt, replyTarget: buildReplyTarget(from, reconnect) };
     if (message.expectsReply) {
       this.pendingAsks.set(message.id, context);
     }

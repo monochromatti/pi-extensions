@@ -287,11 +287,15 @@ test("leak regression: unrelated machine ask only displays on addressed target a
         leaseTtlMs: 30_000,
         heartbeatIntervalMs: 10_000,
       });
-      const sent = await machine.send({ intercomSessionId: intercomSessionA, piSessionId: "pi-session-a" }, {
+      const sent = await machine.sendMachine({
+        kind: "identity-snapshot",
+        intercomSessionId: intercomSessionA,
+        piSessionId: "pi-session-a",
+        reconnect: "same-pi-session-if-unique",
+      }, {
         text: "machine-for-a-only",
         expectsReply: true,
-        origin: "machine",
-      } as never);
+      });
       assert.equal(sent.delivered, true);
       await waitUntil(async () => /machine-for-a-only/.test(text(await receiver.tool("intercom").execute("pending-a", { action: "pending" }, new AbortController().signal, undefined, ctxA))), "A did not receive machine ask");
       assert.doesNotMatch(text(await receiver.tool("intercom").execute("pending-b", { action: "pending" }, new AbortController().signal, undefined, ctxB)), /machine-for-a-only/);
@@ -346,7 +350,7 @@ test("session-scoped runtime keeps inbox isolated after later session start", { 
         heartbeatIntervalMs: 10_000,
       });
 
-      const sent = await sender.send(intercomSessionA, {
+      const sent = await sender.sendManual({ kind: "intercom-session", intercomSessionId: intercomSessionA }, {
         text: "question-for-a",
         expectsReply: true,
       });
@@ -448,7 +452,7 @@ test("inbound broker callbacks stay bound to owning runtime instance", { concurr
         heartbeatIntervalMs: 10_000,
       });
 
-      const sent = await sender.send(intercomSessionB, {
+      const sent = await sender.sendManual({ kind: "intercom-session", intercomSessionId: intercomSessionB }, {
         text: "ask-for-session-b",
         expectsReply: true,
       });
@@ -508,7 +512,7 @@ test("replaced runtime drops delayed inbound flush from old runtime", { concurre
         heartbeatIntervalMs: 10_000,
       });
 
-      const sent = await sender.send(intercomSessionA, {
+      const sent = await sender.sendManual({ kind: "intercom-session", intercomSessionId: intercomSessionA }, {
         text: "race-message-old-runtime",
         expectsReply: true,
       });
@@ -556,7 +560,7 @@ test("result relay enforces owner session and ignores non-owner runtime B", { co
 
       receiver.emitEvent("subagent:result-intercom", {
         ownerPiSessionId: "pi-session-a",
-        target: { alias: "pi-session-b" },
+        target: { kind: "scoped-alias", alias: "pi-session-b", namespace: "test-namespace" },
         to: "pi-session-b",
         message: "result-owner-a-not-b",
         requestId: "result-owner-a-not-b",
@@ -577,7 +581,7 @@ test("result relay enforces owner session and ignores non-owner runtime B", { co
       });
 
       receiver.emitEvent("subagent:result-intercom", {
-        target: { alias: "pi-session-b" },
+        target: { kind: "scoped-alias", alias: "pi-session-b", namespace: "test-namespace" },
         to: "pi-session-b",
         message: "result-missing-owner-must-drop",
         requestId: "result-missing-owner-must-drop",
@@ -624,7 +628,7 @@ test("control relay enforces owner session and ignores non-owner runtime B", { c
 
       receiver.emitEvent("subagent:control-intercom", {
         ownerPiSessionId: "pi-session-a",
-        target: { alias: "pi-session-b" },
+        target: { kind: "scoped-alias", alias: "pi-session-b", namespace: "test-namespace" },
         to: "pi-session-b",
         message: "control-owner-a-not-b",
       });
@@ -638,7 +642,7 @@ test("control relay enforces owner session and ignores non-owner runtime B", { c
       await receiver.emit("session_shutdown", ctxA);
 
       receiver.emitEvent("subagent:control-intercom", {
-        target: { alias: "pi-session-b" },
+        target: { kind: "scoped-alias", alias: "pi-session-b", namespace: "test-namespace" },
         to: "pi-session-b",
         message: "control-missing-owner-must-drop",
       });
@@ -706,7 +710,7 @@ test("result relay does not deliver before child readiness and times out", { con
 
       receiver.emitEvent("subagent:result-intercom", {
         ownerPiSessionId: "pi-session-a",
-        target: { alias: "subagent-worker-run-readiness-timeout-1" },
+        target: { kind: "scoped-alias", alias: "subagent-worker-run-readiness-timeout-1", namespace: "test-namespace" },
         message: "should-not-deliver-before-ready",
         requestId: "readiness-timeout",
         runId: "run-readiness-timeout",
@@ -722,7 +726,7 @@ test("result relay does not deliver before child readiness and times out", { con
 
       receiver.emitEvent("subagent:result-intercom", {
         ownerPiSessionId: "pi-session-a",
-        target: { alias: "subagent-worker-run-readiness-timeout-1" },
+        target: { kind: "scoped-alias", alias: "subagent-worker-run-readiness-timeout-1", namespace: "test-namespace" },
         message: "should-not-deliver-before-ready-zero-wait",
         requestId: "readiness-timeout-zero",
         runId: "run-readiness-timeout",
@@ -834,6 +838,189 @@ test("intercom list shows exact identity, namespace, cwd, and lease state", { co
   });
 });
 
+test("manual send by original alias still routes after status/model/readiness updates", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+
+    const createdClients = new Map<string, IntercomClient>();
+    const originalConnect = IntercomClient.prototype.connect;
+    IntercomClient.prototype.connect = async function capturedConnect(this: IntercomClient, session) {
+      createdClients.set(session.piSessionId, this);
+      return originalConnect.call(this, session);
+    };
+
+    const sender = await createIntercomHarness("sender-alias");
+    const receiver = await createIntercomHarness("receiver-alias");
+    const senderCtx = createContext("pi-sender", { idle: true, cwd: "/repo/shared", hasUI: true });
+    const receiverCtx = createContext("pi-receiver", { idle: true, cwd: "/repo/shared", hasUI: true });
+
+    try {
+      await sender.emit("session_start", senderCtx);
+      await receiver.emit("session_start", receiverCtx);
+      await waitUntil(() => createdClients.has("pi-receiver"), "receiver intercom client not created");
+
+      const receiverClient = createdClients.get("pi-receiver")!;
+      receiverClient.updatePresence({ status: "thinking" });
+      receiverClient.updatePresence({ model: "receiver-model-v2" });
+      receiverClient.updatePresence({ readiness: { state: "ready", updatedAt: Date.now() } });
+
+      const send = await sender.tool("intercom").execute("send-by-stable-alias", {
+        action: "send",
+        to: "receiver-alias",
+        message: "manual-send-after-presence-updates",
+      }, new AbortController().signal, undefined, senderCtx);
+
+      assert.equal(send.isError, false);
+      await waitUntil(
+        () => receiver.sentMessages.some((entry) => entry.message.content?.includes("manual-send-after-presence-updates")),
+        "manual send did not route to original alias",
+      );
+    } finally {
+      IntercomClient.prototype.connect = originalConnect;
+      await sender.emit("session_shutdown", senderCtx);
+      await receiver.emit("session_shutdown", receiverCtx);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("manual string aliases are parsed to scoped/global structured targets before client send", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+
+    const originalSendManual = IntercomClient.prototype.sendManual;
+    const sendCalls: Array<{ to: unknown; options: Record<string, unknown> }> = [];
+    IntercomClient.prototype.sendManual = async function capturedSendManual(this: IntercomClient, to, options) {
+      sendCalls.push({ to, options: options as unknown as Record<string, unknown> });
+      return originalSendManual.call(this, to, options);
+    };
+
+    const sender = await createIntercomHarness("sender-alias");
+    const receiver = await createIntercomHarness("receiver-alias");
+    const senderCtx = createContext("pi-sender", { idle: true, cwd: "/repo/shared", hasUI: true });
+    const receiverCtx = createContext("pi-receiver", { idle: true, cwd: "/repo/shared", hasUI: true });
+
+    try {
+      await sender.emit("session_start", senderCtx);
+      await receiver.emit("session_start", receiverCtx);
+
+      const scopedSend = await sender.tool("intercom").execute("send-scoped-target", {
+        action: "send",
+        to: "receiver-alias",
+        message: "manual-string-scoped-target",
+      }, new AbortController().signal, undefined, senderCtx);
+      assert.equal(scopedSend.isError, false);
+
+      const globalSend = await sender.tool("intercom").execute("send-global-target", {
+        action: "send",
+        to: "global:receiver-alias",
+        message: "manual-string-global-target",
+      }, new AbortController().signal, undefined, senderCtx);
+      assert.equal(globalSend.isError, false);
+
+      await waitUntil(
+        () => receiver.sentMessages.some((entry) => entry.message.content?.includes("manual-string-global-target")),
+        "manual global send did not deliver",
+      );
+
+      const scopedCaptured = sendCalls.find((call) => call.options.text === "manual-string-scoped-target");
+      assert.ok(scopedCaptured, "scoped manual send call not captured");
+      const scopedTarget = scopedCaptured!.to as { kind?: unknown; alias?: unknown; namespace?: unknown };
+      assert.equal(scopedTarget.kind, "scoped-alias");
+      assert.equal(scopedTarget.alias, "receiver-alias");
+      assert.equal(typeof scopedTarget.namespace, "string");
+      assert.match(String(scopedTarget.namespace), /^[a-f0-9]{16}$/);
+
+      const globalCaptured = sendCalls.find((call) => call.options.text === "manual-string-global-target");
+      assert.ok(globalCaptured, "global manual send call not captured");
+      const globalTarget = globalCaptured!.to as { kind?: unknown; alias?: unknown };
+      assert.equal(globalTarget.kind, "global-alias");
+      assert.equal(globalTarget.alias, "receiver-alias");
+    } finally {
+      IntercomClient.prototype.sendManual = originalSendManual;
+      await sender.emit("session_shutdown", senderCtx);
+      await receiver.emit("session_shutdown", receiverCtx);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("reply uses identity-snapshot structured target", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+
+    const capturedTargets: unknown[] = [];
+    const originalSendManual = IntercomClient.prototype.sendManual;
+    IntercomClient.prototype.sendManual = async function capturedSendManual(this: IntercomClient, to, options) {
+      if ((options as { replyTo?: unknown }).replyTo) {
+        capturedTargets.push(to);
+      }
+      return originalSendManual.call(this, to, options);
+    };
+
+    const sender = await createIntercomHarness("sender-alias");
+    const receiver = await createIntercomHarness("receiver-alias");
+    const senderCtx = createContext("pi-sender", { idle: true, cwd: "/repo/shared", hasUI: true });
+    const receiverCtx = createContext("pi-receiver", { idle: true, cwd: "/repo/shared", hasUI: true });
+
+    try {
+      await sender.emit("session_start", senderCtx);
+      await receiver.emit("session_start", receiverCtx);
+
+      const askPromise = sender.tool("intercom").execute("ask-target", {
+        action: "ask",
+        to: "receiver-alias",
+        message: "question-for-reply-snapshot",
+      }, new AbortController().signal, undefined, senderCtx);
+
+      await waitUntil(
+        () => receiver.sentMessages.some((entry) => entry.message.content?.includes("question-for-reply-snapshot")),
+        "ask message was not delivered to receiver",
+      );
+
+      const replied = await receiver.tool("intercom").execute("reply-target", {
+        action: "reply",
+        message: "reply-from-receiver",
+      }, new AbortController().signal, undefined, receiverCtx);
+      assert.equal(replied.isError, false);
+
+      const asked = await askPromise;
+      assert.equal(asked.isError, false);
+
+      const captured = capturedTargets.find((target) => {
+        if (typeof target !== "object" || target === null) return false;
+        return (target as { kind?: unknown }).kind === "identity-snapshot";
+      }) as { kind?: unknown; reconnect?: unknown } | undefined;
+      assert.ok(captured, "identity-snapshot reply target not captured");
+      assert.equal(captured?.kind, "identity-snapshot");
+      assert.equal(captured?.reconnect, "same-pi-session-if-unique");
+    } finally {
+      IntercomClient.prototype.sendManual = originalSendManual;
+      await sender.emit("session_shutdown", senderCtx);
+      await receiver.emit("session_shutdown", receiverCtx);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
 test("status shows identity diagnostics and resolution logs omit message bodies", { concurrency: false }, async () => {
   await withBroker(async (homeDir) => {
     const previousHome = process.env.HOME;
@@ -852,14 +1039,18 @@ test("status shows identity diagnostics and resolution logs omit message bodies"
         waitForReadyMs: 0,
       }, new AbortController().signal, undefined, ctx);
       assert.equal(failed.isError, true);
+      assert.match(text(failed), /Message to "missing-target" was not delivered: Target session not found\./);
+      assert.equal((failed.details as { failure?: { code?: unknown } }).failure?.code, "target-not-found");
       const status = await harness.tool("intercom").execute("status-after-failure", { action: "status" }, new AbortController().signal, undefined, ctx);
       const output = text(status);
       assert.match(output, /Pi session ID: pi-session-a/);
       assert.match(output, /Namespace: [a-f0-9]{16}/);
       assert.match(output, /Lease: lease=active/);
       assert.match(output, /Resolution failures: 1/);
+      assert.match(output, /Recent resolution failures:\n- send target-not-found Target session not found\./);
       const resolutionEntry = harness.appendEntries.find((entry) => entry.type === "intercom_resolution_failed");
       assert.ok(resolutionEntry);
+      assert.equal((resolutionEntry.payload as { failureCode?: unknown }).failureCode, "target-not-found");
       assert.doesNotMatch(JSON.stringify(resolutionEntry.payload), /SECRET BODY MUST NOT BE LOGGED/);
     } finally {
       await harness.emit("session_shutdown", ctx);
@@ -931,6 +1122,84 @@ test("mismatched receiver piSessionId is dropped before pending/UI delivery", { 
         receiver.sentMessages.some((entry) => entry.message.content?.includes("must-be-dropped")),
         false,
       );
+    } finally {
+      IntercomClient.prototype.connect = originalConnect;
+      await receiver.emit("session_shutdown", ctx);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("messages missing exact delivered receiver identity are dropped before pending/UI delivery", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+
+    const createdClients: IntercomClient[] = [];
+    const originalConnect = IntercomClient.prototype.connect;
+    IntercomClient.prototype.connect = async function capturedConnect(this: IntercomClient, session) {
+      createdClients.push(this);
+      return originalConnect.call(this, session);
+    };
+
+    const receiver = await createIntercomHarness("runtime-host");
+    const ctx = createContext("pi-session-a", { idle: true, cwd: "/repo/a", hasUI: true });
+
+    const from: SessionInfo = {
+      id: "sender-session",
+      piSessionId: "pi-sender",
+      namespace: "test-namespace",
+      alias: "sender",
+      cwd: "/repo/sender",
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      leaseTtlMs: 30_000,
+      heartbeatIntervalMs: 10_000,
+      status: "idle",
+    };
+
+    try {
+      await receiver.emit("session_start", ctx);
+      await waitUntil(() => createdClients.length > 0 && Boolean(createdClients[0]!.sessionId), "runtime intercom client not created");
+
+      const runtimeClient = createdClients[0]!;
+      runtimeClient.emit("message", from, {
+        id: "missing-pi",
+        timestamp: Date.now(),
+        to: {
+          intercomSessionId: runtimeClient.sessionId,
+          alias: "runtime-host",
+        },
+        expectsReply: true,
+        content: { text: "missing-pi-must-be-dropped" },
+      } as never);
+      runtimeClient.emit("message", from, {
+        id: "missing-intercom",
+        timestamp: Date.now(),
+        to: {
+          piSessionId: "pi-session-a",
+          alias: "runtime-host",
+        },
+        expectsReply: true,
+        content: { text: "missing-intercom-must-be-dropped" },
+      } as never);
+      await wait(50);
+
+      const pending = await receiver.tool("intercom").execute("pending-after-missing-identity-drop", { action: "pending" }, new AbortController().signal, undefined, ctx);
+      assert.match(text(pending), /No unresolved inbound asks/);
+      assert.equal(
+        receiver.sentMessages.some((entry) => entry.message.content?.includes("missing-pi-must-be-dropped") || entry.message.content?.includes("missing-intercom-must-be-dropped")),
+        false,
+      );
+      const dropped = receiver.appendEntries.filter((entry) => entry.type === "intercom_misroute_dropped");
+      assert.equal(dropped.some((entry) => (entry.payload as Record<string, unknown>).reason === "receiver_identity_missing"), true);
     } finally {
       IntercomClient.prototype.connect = originalConnect;
       await receiver.emit("session_shutdown", ctx);
@@ -1053,6 +1322,7 @@ test("dropped misroute diagnostics are structured and bounded", { concurrency: f
           id: `misroute-${i}`,
           timestamp: Date.now() + i,
           to: {
+            intercomSessionId: "runtime-intercom",
             piSessionId: "pi-session-b",
           },
           content: {

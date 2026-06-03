@@ -2,6 +2,7 @@ import type { Component, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import type { IntercomClient } from "../broker/client.ts";
+import { formatDeliveryFailure } from "../delivery-failure.ts";
 import type { SessionInfo } from "../types.ts";
 
 export interface ComposeResult {
@@ -79,12 +80,12 @@ export class ComposeOverlay implements Component {
     this.tui.requestRender();
 
     try {
-      const result = await this.client.send(this.target.id, {
+      const result = await this.client.sendManual({ kind: "intercom-session", intercomSessionId: this.target.id }, {
         text: this.inputBuffer.trim(),
       });
       
       if (!result.delivered) {
-        this.error = result.reason ?? "Message not delivered. Session may not exist or has disconnected.";
+        this.error = result.failure ? formatDeliveryFailure(result.failure) : "Message not delivered.";
         this.sending = false;
         this.tui.requestRender();
         return;

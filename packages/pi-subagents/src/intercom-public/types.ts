@@ -64,14 +64,9 @@ export function buildIntercomRegistration(input: {
   };
 }
 
-export interface Message {
+export interface OutboundMessage {
   id: string;
   timestamp: number;
-  to?: {
-    intercomSessionId?: string;
-    piSessionId?: string;
-    alias?: string;
-  };
   replyTo?: string;
   expectsReply?: boolean;
   content: {
@@ -80,6 +75,38 @@ export interface Message {
   };
 }
 
+export interface ResolvedTargetIdentity {
+  intercomSessionId: string;
+  piSessionId: string;
+  alias?: string;
+}
+
+export interface DeliveredMessage extends OutboundMessage {
+  to: ResolvedTargetIdentity;
+}
+
+export type Message = OutboundMessage | DeliveredMessage;
+
+export interface DeliveryFailureCandidate {
+  intercomSessionId: string;
+  piSessionId: string;
+  alias: string;
+  namespace: string;
+  cwd: string;
+  pid: number;
+  startedAt: number;
+  leaseExpiresAt?: number;
+}
+
+export type DeliveryFailure =
+  | { code: "forged-sender" }
+  | { code: "unregistered-sender" }
+  | { code: "unsafe-machine-alias-target" }
+  | { code: "target-not-found" }
+  | { code: "expired-target" }
+  | { code: "ambiguous-alias"; label: string; candidates: DeliveryFailureCandidate[] }
+  | { code: "duplicate-pi-session"; piSessionId: string; candidates: DeliveryFailureCandidate[] };
+
 export interface Attachment {
   type: "file" | "snippet" | "context";
   name: string;
@@ -87,13 +114,48 @@ export interface Attachment {
   language?: string;
 }
 
-export interface SendTargetEnvelope {
-  intercomSessionId?: string;
-  piSessionId?: string;
-  alias?: string;
-  namespace?: string;
-  global?: boolean;
+export type IdentitySnapshotReconnectPolicy = "same-intercom-session" | "same-pi-session-if-unique";
+
+export interface IntercomSessionTarget {
+  kind: "intercom-session";
+  intercomSessionId: string;
 }
+
+export interface PiSessionTarget {
+  kind: "pi-session";
+  piSessionId: string;
+}
+
+export interface IdentitySnapshotTarget {
+  kind: "identity-snapshot";
+  intercomSessionId: string;
+  piSessionId: string;
+  alias?: string;
+  reconnect: IdentitySnapshotReconnectPolicy;
+}
+
+export interface ScopedAliasTarget {
+  kind: "scoped-alias";
+  alias: string;
+  namespace: string;
+}
+
+export interface GlobalAliasTarget {
+  kind: "global-alias";
+  alias: string;
+}
+
+export type IntercomTarget =
+  | IntercomSessionTarget
+  | PiSessionTarget
+  | IdentitySnapshotTarget
+  | ScopedAliasTarget
+  | GlobalAliasTarget;
+
+export type MachineIntercomTarget = IntercomSessionTarget | PiSessionTarget | IdentitySnapshotTarget;
+export type ManualIntercomTarget = IntercomTarget;
+
+export type SendTargetEnvelope = IntercomTarget;
 
 export type IntercomMessageOrigin = "manual" | "machine";
 
@@ -101,11 +163,10 @@ export type ClientMessage =
   | { type: "register"; session: IntercomRegistration }
   | { type: "unregister" }
   | { type: "list"; requestId: string }
-  | { type: "send"; to: string | SendTargetEnvelope; message: Message; origin?: IntercomMessageOrigin }
+  | { type: "send"; to: ManualIntercomTarget; message: OutboundMessage; origin: IntercomMessageOrigin }
   | { type: "heartbeat" }
   | {
     type: "presence";
-    alias?: string;
     status?: string;
     model?: string;
     readiness?: SessionReadiness;
@@ -115,10 +176,10 @@ export type ClientMessage =
 export type BrokerMessage =
   | { type: "registered"; sessionId: string }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }
-  | { type: "message"; from: SessionInfo; message: Message }
+  | { type: "message"; from: SessionInfo; message: DeliveredMessage }
   | { type: "presence_update"; session: SessionInfo }
   | { type: "session_joined"; session: SessionInfo }
   | { type: "session_left"; sessionId: string }
   | { type: "error"; error: string }
   | { type: "delivered"; messageId: string }
-  | { type: "delivery_failed"; messageId: string; reason: string };
+  | { type: "delivery_failed"; messageId: string; failure: DeliveryFailure };

@@ -5,14 +5,16 @@ import { homedir } from "os";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerSocketDir, getBrokerSocketPath } from "./paths.ts";
+import { decodeClientFrame } from "./protocol.ts";
 import {
-  type SessionInfo,
-  type SessionReadiness,
-  type SessionSubagentMetadata,
-  type Message,
-  type Attachment,
+  type DeliveryFailure,
+  type DeliveryFailureCandidate,
   type BrokerMessage,
-  type SendTargetEnvelope,
+  type DeliveredMessage,
+  type MachineIntercomTarget,
+  type ManualIntercomTarget,
+  type ResolvedTargetIdentity,
+  type SessionInfo,
 } from "../types.ts";
 
 const INTERCOM_DIR = join(homedir(), ".pi/agent/intercom");
@@ -24,179 +26,11 @@ interface ConnectedSession {
   info: SessionInfo;
 }
 
-function isAttachment(value: unknown): value is Attachment {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const attachment = value as Record<string, unknown>;
-
-  if (
-    attachment.type !== "file"
-    && attachment.type !== "snippet"
-    && attachment.type !== "context"
-  ) {
-    return false;
-  }
-
-  if (typeof attachment.name !== "string" || typeof attachment.content !== "string") {
-    return false;
-  }
-
-  return attachment.language === undefined || typeof attachment.language === "string";
-}
-
-function isMessage(value: unknown): value is Message {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const message = value as Record<string, unknown>;
-
-  if (typeof message.id !== "string" || typeof message.timestamp !== "number") {
-    return false;
-  }
-
-  if (message.to !== undefined) {
-    if (typeof message.to !== "object" || message.to === null) {
-      return false;
-    }
-
-    const to = message.to as Record<string, unknown>;
-    if (to.intercomSessionId !== undefined && typeof to.intercomSessionId !== "string") {
-      return false;
-    }
-    if (to.piSessionId !== undefined && typeof to.piSessionId !== "string") {
-      return false;
-    }
-    if (to.alias !== undefined && typeof to.alias !== "string") {
-      return false;
-    }
-  }
-
-  if (message.replyTo !== undefined && typeof message.replyTo !== "string") {
-    return false;
-  }
-
-  if (message.expectsReply !== undefined && typeof message.expectsReply !== "boolean") {
-    return false;
-  }
-
-  if (typeof message.content !== "object" || message.content === null) {
-    return false;
-  }
-
-  const content = message.content as Record<string, unknown>;
-  if (typeof content.text !== "string") {
-    return false;
-  }
-
-  return content.attachments === undefined
-    || (Array.isArray(content.attachments) && content.attachments.every(isAttachment));
-}
-
-function isSendTargetEnvelope(value: unknown): value is SendTargetEnvelope {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-
-  const target = value as Record<string, unknown>;
-  if (target.intercomSessionId !== undefined && typeof target.intercomSessionId !== "string") {
-    return false;
-  }
-  if (target.piSessionId !== undefined && typeof target.piSessionId !== "string") {
-    return false;
-  }
-  if (target.alias !== undefined && typeof target.alias !== "string") {
-    return false;
-  }
-  if (target.namespace !== undefined && typeof target.namespace !== "string") {
-    return false;
-  }
-  if (target.global !== undefined && typeof target.global !== "boolean") {
-    return false;
-  }
-
-  return true;
-}
-
-function isSessionReadiness(value: unknown): value is SessionReadiness {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const readiness = value as Record<string, unknown>;
-  if (
-    readiness.state !== "initializing"
-    && readiness.state !== "ready"
-    && readiness.state !== "stopping"
-  ) {
-    return false;
-  }
-  if (readiness.reason !== undefined && typeof readiness.reason !== "string") {
-    return false;
-  }
-  return typeof readiness.updatedAt === "number";
-}
-
-function isSessionSubagentMetadata(value: unknown): value is SessionSubagentMetadata {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const subagent = value as Record<string, unknown>;
-  return typeof subagent.ownerPiSessionId === "string"
-    && typeof subagent.runId === "string"
-    && typeof subagent.agent === "string"
-    && typeof subagent.index === "number"
-    && Number.isInteger(subagent.index)
-    && subagent.index >= 0;
-}
-
-function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id"> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-
-  const session = value as Record<string, unknown>;
-
-  if (
-    typeof session.cwd !== "string"
-    || typeof session.model !== "string"
-    || typeof session.pid !== "number"
-    || typeof session.startedAt !== "number"
-    || typeof session.lastActivity !== "number"
-  ) {
-    return false;
-  }
-
-  if (typeof session.alias !== "string" || session.alias.trim() === "") {
-    return false;
-  }
-
-  if (typeof session.namespace !== "string" || session.namespace.trim() === "") {
-    return false;
-  }
-
-  if (typeof session.piSessionId !== "string" || session.piSessionId.trim() === "") {
-    return false;
-  }
-  if (typeof session.leaseTtlMs !== "number" || !Number.isFinite(session.leaseTtlMs) || session.leaseTtlMs < 0) {
-    return false;
-  }
-  if (typeof session.heartbeatIntervalMs !== "number" || !Number.isFinite(session.heartbeatIntervalMs) || session.heartbeatIntervalMs < 0) {
-    return false;
-  }
-  if (session.readiness !== undefined && !isSessionReadiness(session.readiness)) {
-    return false;
-  }
-  if (session.subagent !== undefined && !isSessionSubagentMetadata(session.subagent)) {
-    return false;
-  }
-
-  return session.status === undefined || typeof session.status === "string";
-}
-
 class IntercomBroker {
   private sessions = new Map<string, ConnectedSession>();
+  private piSessionIndex = new Map<string, Set<string>>();
+  private scopedAliasIndex = new Map<string, Set<string>>();
+  private globalAliasIndex = new Map<string, Set<string>>();
   private server: net.Server;
   private shutdownTimer: NodeJS.Timeout | null = null;
 
@@ -237,7 +71,7 @@ class IntercomBroker {
 
     socket.on("close", () => {
       if (sessionId) {
-        this.sessions.delete(sessionId);
+        this.removeSession(sessionId);
         this.broadcast({ type: "session_left", sessionId }, sessionId);
 
         this.scheduleShutdownCheck();
@@ -267,20 +101,11 @@ class IntercomBroker {
     currentId: string | null,
     setId: (id: string | null) => void,
   ): void {
-    if (typeof msg !== "object" || msg === null || !("type" in msg) || typeof msg.type !== "string") {
-      throw new Error("Invalid client message");
-    }
-
-    const clientMessage = msg as { type: string } & Record<string, unknown>;
+    const clientMessage = decodeClientFrame(msg);
 
     if (currentId === null && clientMessage.type !== "register") {
       if (clientMessage.type === "send" && clientMessage.origin === "machine") {
-        const message = clientMessage.message;
-        writeMessage(socket, {
-          type: "delivery_failed",
-          messageId: isMessage(message) ? message.id : "unknown",
-          reason: "unregistered-sender",
-        });
+        this.writeDeliveryFailed(socket, clientMessage.message.id, { code: "unregistered-sender" });
         return;
       }
       throw new Error(`Received ${clientMessage.type} before register`);
@@ -288,14 +113,10 @@ class IntercomBroker {
 
     switch (clientMessage.type) {
       case "register": {
-        if (!isSessionRegistration(clientMessage.session)) {
-          throw new Error("Invalid register message");
-        }
-
         if (currentId) {
           throw new Error("Received duplicate register message");
         }
-        
+
         const id = randomUUID();
         setId(id);
         const now = Date.now();
@@ -304,8 +125,8 @@ class IntercomBroker {
           id,
           lastActivity: now,
         };
-        this.sessions.set(id, { socket, info });
-        
+        this.addSession(id, { socket, info });
+
         if (this.shutdownTimer) {
           clearTimeout(this.shutdownTimer);
           this.shutdownTimer = null;
@@ -317,7 +138,7 @@ class IntercomBroker {
       }
 
       case "unregister": {
-        this.sessions.delete(currentId);
+        this.removeSession(currentId);
         this.broadcast({ type: "session_left", sessionId: currentId }, currentId);
         setId(null);
         this.scheduleShutdownCheck();
@@ -325,86 +146,41 @@ class IntercomBroker {
       }
 
       case "list": {
-        if (typeof clientMessage.requestId !== "string") {
-          throw new Error("Invalid list message");
-        }
-
         this.expireInactiveSessions();
-        const sessions = Array.from(this.sessions.values()).map(s => s.info);
+        const sessions = Array.from(this.sessions.values()).map((s) => s.info);
         writeMessage(socket, { type: "sessions", requestId: clientMessage.requestId, sessions });
         break;
       }
 
       case "send": {
         const message = clientMessage.message;
-        const messageId = isMessage(message) ? message.id : "unknown";
-
-        if (!isMessage(message) || (typeof clientMessage.to !== "string" && !isSendTargetEnvelope(clientMessage.to))) {
-          writeMessage(socket, {
-            type: "delivery_failed",
-            messageId,
-            reason: "Invalid message format",
-          });
-          break;
-        }
-
-        if ("from" in clientMessage) {
-          writeMessage(socket, {
-            type: "delivery_failed",
-            messageId: message.id,
-            reason: "forged-from-field",
-          });
-          break;
-        }
         const fromSession = this.sessions.get(currentId);
         if (!fromSession) {
-          writeMessage(socket, {
-            type: "delivery_failed",
-            messageId: message.id,
-            reason: "Sender session not found",
-          });
+          this.writeDeliveryFailed(socket, message.id, { code: "forged-sender" });
           break;
         }
 
-        const origin = clientMessage.origin === "machine" ? "machine" : "manual";
-        if (origin === "machine") {
-          if (!this.isExactMachineTarget(clientMessage.to)) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "unsafe-machine-alias-target",
-            });
-            break;
-          }
+        if (clientMessage.origin === "machine" && !this.isExactMachineTarget(clientMessage.to)) {
+          this.writeDeliveryFailed(socket, message.id, { code: "unsafe-machine-alias-target" });
+          break;
         }
 
         this.expireInactiveSessions();
-        const resolvedTarget = this.resolveSendTarget(clientMessage.to, fromSession.info);
-        if (resolvedTarget.error) {
-          writeMessage(socket, {
-            type: "delivery_failed",
-            messageId: message.id,
-            reason: resolvedTarget.error,
-          });
+        const resolvedTarget = this.resolveSendTarget(clientMessage.to);
+        if (resolvedTarget.failure) {
+          this.writeDeliveryFailed(socket, message.id, resolvedTarget.failure);
           break;
         }
 
         if (!resolvedTarget.session) {
-          writeMessage(socket, {
-            type: "delivery_failed",
-            messageId: message.id,
-            reason: "Session not found",
-          });
+          this.writeDeliveryFailed(socket, message.id, { code: "target-not-found" });
           break;
         }
 
-        const { to: _ignoredTargetMetadata, ...messageWithoutClientReceiver } = message;
-        const deliveredMessage: Message = resolvedTarget.receiver
-          ? {
-            ...messageWithoutClientReceiver,
-            to: resolvedTarget.receiver,
-          }
-          : messageWithoutClientReceiver;
+        const deliveredMessage: DeliveredMessage = {
+          ...message,
+          to: resolvedTarget.receiver ?? this.toResolvedTargetIdentity(resolvedTarget.session.info),
+        };
         writeMessage(resolvedTarget.session.socket, {
           type: "message",
           from: fromSession.info,
@@ -417,34 +193,16 @@ class IntercomBroker {
       case "presence": {
         const session = this.sessions.get(currentId);
         if (session) {
-          if (clientMessage.alias !== undefined) {
-            if (typeof clientMessage.alias !== "string") {
-              throw new Error("Invalid presence name");
-            }
-            session.info.alias = clientMessage.alias;
-          }
           if (clientMessage.status !== undefined) {
-            if (typeof clientMessage.status !== "string") {
-              throw new Error("Invalid presence status");
-            }
             session.info.status = clientMessage.status;
           }
           if (clientMessage.model !== undefined) {
-            if (typeof clientMessage.model !== "string") {
-              throw new Error("Invalid presence model");
-            }
             session.info.model = clientMessage.model;
           }
           if (clientMessage.readiness !== undefined) {
-            if (!isSessionReadiness(clientMessage.readiness)) {
-              throw new Error("Invalid presence readiness");
-            }
             session.info.readiness = clientMessage.readiness;
           }
           if (clientMessage.subagent !== undefined) {
-            if (!isSessionSubagentMetadata(clientMessage.subagent)) {
-              throw new Error("Invalid presence subagent metadata");
-            }
             session.info.subagent = clientMessage.subagent;
           }
           session.info.lastActivity = Date.now();
@@ -460,130 +218,229 @@ class IntercomBroker {
         }
         break;
       }
-
-      default:
-        throw new Error(`Unknown client message type: ${clientMessage.type}`);
     }
   }
 
-  private isExactMachineTarget(target: string | SendTargetEnvelope): target is SendTargetEnvelope {
-    return typeof target !== "string" && Boolean(target.intercomSessionId || target.piSessionId);
+  private isExactMachineTarget(target: ManualIntercomTarget): target is MachineIntercomTarget {
+    return target.kind === "intercom-session"
+      || target.kind === "pi-session"
+      || target.kind === "identity-snapshot";
   }
 
   private expireInactiveSessions(now = Date.now()): void {
     for (const [id, session] of this.sessions) {
       const ttl = session.info.leaseTtlMs;
       if (typeof ttl === "number" && ttl >= 0 && session.info.lastActivity + ttl <= now) {
-        this.sessions.delete(id);
+        this.removeSession(id);
         this.broadcast({ type: "session_left", sessionId: id }, id);
       }
     }
   }
 
-  private resolveSendTarget(target: string | SendTargetEnvelope, sender?: SessionInfo): {
+  private resolveSendTarget(target: ManualIntercomTarget): {
     session: ConnectedSession | null;
-    receiver?: Message["to"];
-    error?: string;
+    receiver?: ResolvedTargetIdentity;
+    failure?: DeliveryFailure;
   } {
-    if (typeof target === "string") {
-      const byId = this.sessions.get(target);
-      if (byId) {
-        return { session: byId };
-      }
-      const byAlias = this.findByAlias(target, sender?.namespace);
-      if (byAlias.length > 1) {
+    switch (target.kind) {
+      case "intercom-session": {
+        const byId = this.sessions.get(target.intercomSessionId);
+        if (byId) {
+          return { session: byId, receiver: this.toResolvedTargetIdentity(byId.info) };
+        }
         return {
           session: null,
-          error: this.formatAmbiguousTargetError(target, byAlias),
+          failure: { code: "expired-target" },
         };
       }
-      const resolved = byAlias[0] ?? null;
-      return {
-        session: resolved,
-      };
-    }
-
-    if (target.intercomSessionId) {
-      const byId = this.sessions.get(target.intercomSessionId);
-      if (byId) {
-        return { session: byId, receiver: { intercomSessionId: byId.info.id, piSessionId: byId.info.piSessionId, alias: byId.info.alias } };
-      }
-    }
-
-    if (target.piSessionId) {
-      const byPiSessionId = this.findByPiSessionId(target.piSessionId);
-      if (byPiSessionId.length > 1) {
+      case "pi-session": {
+        const byPiSessionId = this.findByPiSessionId(target.piSessionId);
+        if (byPiSessionId.length > 1) {
+          return {
+            session: null,
+            failure: this.duplicatePiSessionFailure(target.piSessionId, byPiSessionId),
+          };
+        }
+        if (byPiSessionId.length === 1) {
+          const resolved = byPiSessionId[0]!;
+          return { session: resolved, receiver: this.toResolvedTargetIdentity(resolved.info) };
+        }
         return {
           session: null,
-          receiver: { intercomSessionId: target.intercomSessionId, piSessionId: target.piSessionId, alias: target.alias },
-          error: this.formatAmbiguousTargetError(`piSessionId:${target.piSessionId}`, byPiSessionId, "duplicate-pi-session-conflict"),
+          failure: { code: "expired-target" },
         };
       }
-      if (byPiSessionId.length === 1) {
-        const resolved = byPiSessionId[0]!;
-        return { session: resolved, receiver: { intercomSessionId: resolved.info.id, piSessionId: resolved.info.piSessionId, alias: resolved.info.alias } };
-      }
-    }
+      case "identity-snapshot": {
+        const byId = this.sessions.get(target.intercomSessionId);
+        if (byId) {
+          return { session: byId, receiver: this.toResolvedTargetIdentity(byId.info) };
+        }
 
-    if (target.alias) {
-      const aliasNamespace = target.global ? undefined : (target.namespace ?? sender?.namespace);
-      const scoped = this.findByAlias(target.alias, aliasNamespace);
-      if (scoped.length > 1) {
+        if (target.reconnect === "same-intercom-session") {
+          return {
+            session: null,
+            failure: { code: "expired-target" },
+          };
+        }
+
+        const byPiSessionId = this.findByPiSessionId(target.piSessionId);
+        if (byPiSessionId.length > 1) {
+          return {
+            session: null,
+            failure: this.duplicatePiSessionFailure(target.piSessionId, byPiSessionId),
+          };
+        }
+        if (byPiSessionId.length === 1) {
+          const resolved = byPiSessionId[0]!;
+          return { session: resolved, receiver: this.toResolvedTargetIdentity(resolved.info) };
+        }
+
         return {
           session: null,
-          receiver: { intercomSessionId: target.intercomSessionId, piSessionId: target.piSessionId, alias: target.alias },
-          error: this.formatAmbiguousTargetError(`alias:${target.alias}${target.namespace ? `@${target.namespace}` : ""}`, scoped),
+          failure: { code: "expired-target" },
         };
       }
-      if (scoped.length === 1) {
-        const resolved = scoped[0]!;
-        return { session: resolved, receiver: { intercomSessionId: resolved.info.id, piSessionId: resolved.info.piSessionId, alias: resolved.info.alias } };
-      }
+      case "scoped-alias": {
+        const scoped = this.findByAlias(target.alias, target.namespace);
+        if (scoped.length > 1) {
+          return {
+            session: null,
+            failure: this.ambiguousAliasFailure(`alias:${target.alias}@${target.namespace}`, scoped),
+          };
+        }
+        if (scoped.length === 1) {
+          const resolved = scoped[0]!;
+          return { session: resolved, receiver: this.toResolvedTargetIdentity(resolved.info) };
+        }
 
-      if (aliasNamespace) {
         return {
           session: null,
-          receiver: { intercomSessionId: target.intercomSessionId, piSessionId: target.piSessionId, alias: target.alias },
+          failure: { code: "target-not-found" },
+        };
+      }
+      case "global-alias": {
+        const scoped = this.findByAlias(target.alias, undefined);
+        if (scoped.length > 1) {
+          return {
+            session: null,
+            failure: this.ambiguousAliasFailure(`alias:${target.alias}`, scoped),
+          };
+        }
+        if (scoped.length === 1) {
+          const resolved = scoped[0]!;
+          return { session: resolved, receiver: this.toResolvedTargetIdentity(resolved.info) };
+        }
+
+        return {
+          session: null,
+          failure: { code: "target-not-found" },
         };
       }
     }
+  }
 
+  private toResolvedTargetIdentity(session: SessionInfo): ResolvedTargetIdentity {
     return {
-      session: null,
-      receiver: {
-        intercomSessionId: target.intercomSessionId,
-        piSessionId: target.piSessionId,
-        alias: target.alias,
-      },
+      intercomSessionId: session.id,
+      piSessionId: session.piSessionId,
+      ...(session.alias ? { alias: session.alias } : {}),
     };
   }
 
-  private findByAlias(alias: string, namespace?: string): ConnectedSession[] {
-    const lowerAlias = alias.toLowerCase();
-    const values = Array.from(this.sessions.values()).filter((session) => {
-      if (session.info.alias.toLowerCase() !== lowerAlias) {
-        return false;
-      }
-      if (namespace === undefined) {
-        return true;
-      }
-      return session.info.namespace === namespace;
-    });
+  private addSession(id: string, session: ConnectedSession): void {
+    this.sessions.set(id, session);
+    this.addIndexValue(this.piSessionIndex, session.info.piSessionId, id);
+    this.addIndexValue(this.scopedAliasIndex, this.scopedAliasKey(session.info.namespace, session.info.alias), id);
+    this.addIndexValue(this.globalAliasIndex, session.info.alias.toLowerCase(), id);
+  }
+
+  private removeSession(id: string): ConnectedSession | undefined {
+    const session = this.sessions.get(id);
+    if (!session) return undefined;
+    this.sessions.delete(id);
+    this.removeIndexValue(this.piSessionIndex, session.info.piSessionId, id);
+    this.removeIndexValue(this.scopedAliasIndex, this.scopedAliasKey(session.info.namespace, session.info.alias), id);
+    this.removeIndexValue(this.globalAliasIndex, session.info.alias.toLowerCase(), id);
+    return session;
+  }
+
+  private addIndexValue(index: Map<string, Set<string>>, key: string, id: string): void {
+    const values = index.get(key) ?? new Set<string>();
+    values.add(id);
+    index.set(key, values);
+  }
+
+  private removeIndexValue(index: Map<string, Set<string>>, key: string, id: string): void {
+    const values = index.get(key);
+    if (!values) return;
+    values.delete(id);
+    if (values.size === 0) {
+      index.delete(key);
+    }
+  }
+
+  private scopedAliasKey(namespace: string, alias: string): string {
+    return `${namespace}\0${alias.toLowerCase()}`;
+  }
+
+  private sessionsForIds(ids: Iterable<string>): ConnectedSession[] {
+    const values = Array.from(ids)
+      .map((id) => this.sessions.get(id))
+      .filter((session): session is ConnectedSession => Boolean(session));
     values.sort((a, b) => a.info.id.localeCompare(b.info.id));
     return values;
+  }
+
+  private findByAlias(alias: string, namespace?: string): ConnectedSession[] {
+    const ids = namespace === undefined
+      ? this.globalAliasIndex.get(alias.toLowerCase())
+      : this.scopedAliasIndex.get(this.scopedAliasKey(namespace, alias));
+    return ids ? this.sessionsForIds(ids) : [];
   }
 
   private findByPiSessionId(piSessionId: string): ConnectedSession[] {
-    const values = Array.from(this.sessions.values()).filter((session) => session.info.piSessionId === piSessionId);
-    values.sort((a, b) => a.info.id.localeCompare(b.info.id));
-    return values;
+    const ids = this.piSessionIndex.get(piSessionId);
+    return ids ? this.sessionsForIds(ids) : [];
   }
 
-  private formatAmbiguousTargetError(label: string, candidates: ConnectedSession[], code = "ambiguous-target"): string {
-    const details = candidates
-      .map((candidate) => `${candidate.info.id}(piSessionId=${candidate.info.piSessionId},alias=${candidate.info.alias},namespace=${candidate.info.namespace},cwd=${candidate.info.cwd},pid=${candidate.info.pid},startedAt=${candidate.info.startedAt},leaseExpiresAt=${this.leaseExpiresAt(candidate.info)})`)
-      .join(", ");
-    return `${code}: Ambiguous target "${label}". Candidates: ${details}`;
+  private ambiguousAliasFailure(label: string, candidates: ConnectedSession[]): DeliveryFailure {
+    return {
+      code: "ambiguous-alias",
+      label,
+      candidates: this.buildFailureCandidates(candidates),
+    };
+  }
+
+  private duplicatePiSessionFailure(piSessionId: string, candidates: ConnectedSession[]): DeliveryFailure {
+    return {
+      code: "duplicate-pi-session",
+      piSessionId,
+      candidates: this.buildFailureCandidates(candidates),
+    };
+  }
+
+  private buildFailureCandidates(candidates: ConnectedSession[]): DeliveryFailureCandidate[] {
+    return candidates
+      .slice()
+      .sort((left, right) => left.info.id.localeCompare(right.info.id))
+      .map((candidate) => ({
+        intercomSessionId: candidate.info.id,
+        piSessionId: candidate.info.piSessionId,
+        alias: candidate.info.alias,
+        namespace: candidate.info.namespace,
+        cwd: candidate.info.cwd,
+        pid: candidate.info.pid,
+        startedAt: candidate.info.startedAt,
+        ...(this.leaseExpiresAt(candidate.info) !== undefined ? { leaseExpiresAt: this.leaseExpiresAt(candidate.info) } : {}),
+      }));
+  }
+
+  private writeDeliveryFailed(socket: net.Socket, messageId: string, failure: DeliveryFailure): void {
+    writeMessage(socket, {
+      type: "delivery_failed",
+      messageId,
+      failure,
+    });
   }
 
   private leaseExpiresAt(session: SessionInfo): number | undefined {
@@ -605,6 +462,9 @@ class IntercomBroker {
       session.socket.end();
     }
     this.sessions.clear();
+    this.piSessionIndex.clear();
+    this.scopedAliasIndex.clear();
+    this.globalAliasIndex.clear();
     if (process.platform !== "win32") {
       try {
         unlinkSync(SOCKET_PATH);

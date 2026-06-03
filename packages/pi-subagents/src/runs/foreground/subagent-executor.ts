@@ -409,7 +409,7 @@ async function resumeAsyncRun(input: {
 		const delivered = await deliverSubagentIntercomMessageEvent(
 			input.deps.pi.events,
 			{
-				target: { alias: target.intercomTarget },
+				target: { kind: "global-alias", alias: target.intercomTarget },
 				message: `Follow-up for async run ${target.runId} (${target.agent}):\n\n${followUp}`,
 				timeoutMs: 7000,
 				extra: {
