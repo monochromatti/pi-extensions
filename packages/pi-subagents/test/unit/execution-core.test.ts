@@ -97,6 +97,7 @@ test("3.7/3.8 + 4.5/4.6 child args include subagent metadata env and structured 
     childIndex: 2,
   });
   assert.ok(args.includes("Task: echo hi"));
+  assert.deepEqual(args.slice(args.indexOf("--name"), args.indexOf("--name") + 2), ["--name", "child-session"]);
   assert.equal(env[SUBAGENT_CHILD_ENV], "1");
   assert.equal(env.PI_SUBAGENT_INTERCOM_SESSION_NAME, "child-session");
   assert.equal(env[SUBAGENT_ORCHESTRATOR_TARGET_ENV], "parent-session");

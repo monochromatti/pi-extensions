@@ -58,6 +58,7 @@ export function applyThinkingSuffix(model: string | undefined, thinking: string 
 
 export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	const args = [...input.baseArgs];
+	const sessionName = input.intercomSessionName?.trim();
 
 	if (input.sessionFile) {
 		fs.mkdirSync(path.dirname(input.sessionFile), { recursive: true });
@@ -70,6 +71,10 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 			fs.mkdirSync(input.sessionDir, { recursive: true });
 			args.push("--session-dir", input.sessionDir);
 		}
+	}
+
+	if (sessionName) {
+		args.push("--name", sessionName);
 	}
 
 	const modelArg = applyThinkingSuffix(input.model, input.thinking);
