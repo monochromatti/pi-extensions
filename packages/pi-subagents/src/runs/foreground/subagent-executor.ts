@@ -8,6 +8,7 @@ import { toModelInfo, type ModelInfo } from "../../shared/model-info.ts";
 import { executeChain } from "./chain-execution.ts";
 import { clearPendingForegroundControlNotices } from "../../extension/control-notices.ts";
 import { runSync } from "./execution.ts";
+import { createUpdateChannel, isStaleAgentListenerError } from "./update-channel.ts";
 import { resolveModelCandidate } from "../shared/model-fallback.ts";
 import { aggregateParallelOutputs } from "../shared/parallel-utils.ts";
 import { recordRun } from "../shared/run-history.ts";
@@ -1701,8 +1702,14 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			);
 		}
 
+		const updateChannel = createUpdateChannel<AgentToolResult<Details>>(onUpdate, {
+			onError: (error) => {
+				if (isStaleAgentListenerError(error)) return;
+				console.warn("pi-subagents progress update callback failed; disabling live updates", error);
+			},
+		});
 		const onUpdateWithContext = onUpdate
-			? (r: AgentToolResult<Details>) => onUpdate(withForkContext(r, effectiveParams.context))
+			? (r: AgentToolResult<Details>) => updateChannel.emit(withForkContext(r, effectiveParams.context))
 			: undefined;
 
 		const execData: ExecutionContextData = {
@@ -1752,6 +1759,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		} catch (error) {
 			return toExecutionErrorResult(effectiveParams, error);
 		} finally {
+			updateChannel.close();
 			if (foregroundControl) {
 				clearPendingForegroundControlNotices(deps.state, runId);
 				deps.state.foregroundControls.delete(runId);

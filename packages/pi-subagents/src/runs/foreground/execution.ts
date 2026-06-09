@@ -38,6 +38,7 @@ import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit
 import { prepareChildRun } from "../shared/child-run-preparation.ts";
 import { captureSingleOutputSnapshot, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import { finalizeChildOutput } from "../shared/output-finalizer.ts";
+import { createUpdateChannel, isStaleAgentListenerError } from "./update-channel.ts";
 import {
 	buildModelCandidates,
 	formatModelAttemptNote,
@@ -126,6 +127,13 @@ async function runSingleAttempt(
 		outputSnapshot?: SingleOutputSnapshot;
 	},
 ): Promise<SingleResult> {
+	const updateChannel = createUpdateChannel(options.onUpdate, {
+		onError: (error) => {
+			if (isStaleAgentListenerError(error)) return;
+			console.warn("pi-subagents progress update callback failed; disabling live updates", error);
+		},
+	});
+
 	const prepared = prepareChildRun({
 		baseArgs: ["--mode", "json", "-p"],
 		task,
@@ -382,11 +390,11 @@ async function runSingleAttempt(
 
 
 		const emitUpdateSnapshot = (text: string) => {
-			if (!options.onUpdate || processClosed) return;
+			if (processClosed || updateChannel.isClosed()) return;
 			const progressSnapshot = snapshotProgress(progress);
 			const resultSnapshot = snapshotResult(result, progressSnapshot);
 			const controlEvents = drainPendingControlEvents();
-			options.onUpdate({
+			updateChannel.emit({
 				content: [{ type: "text", text }],
 				details: {
 					mode: "single",
@@ -703,11 +711,11 @@ async function runSingleAttempt(
 		? finalizedOutput.displayOutput
 		: fullOutput;
 	result.controlEvents = allControlEvents.length ? allControlEvents : undefined;
-	if (options.onUpdate) {
+	if (!updateChannel.isClosed()) {
 		const finalText = result.finalOutput || result.error || "(no output)";
 		const progressSnapshot = snapshotProgress(progress);
 		const resultSnapshot = snapshotResult(result, progressSnapshot);
-		options.onUpdate({
+		updateChannel.emit({
 			content: [{ type: "text", text: finalText }],
 			details: {
 				mode: "single",
@@ -717,6 +725,7 @@ async function runSingleAttempt(
 			},
 		});
 	}
+	updateChannel.close();
 	return result;
 }
 
