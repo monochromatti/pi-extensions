@@ -1,0 +1,124 @@
+:root {
+	color-scheme: light dark;
+}
+
+code-block {
+	display: block;
+	margin: 0.75rem 0;
+	border: 1px solid color-mix(in oklab, currentColor 28%, transparent);
+	border-radius: 0.5rem;
+	overflow: hidden;
+}
+
+.code-block-shell {
+	background: color-mix(in oklab, canvas 86%, black 14%);
+}
+
+.code-toolbar {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 0.35rem 0.6rem;
+	border-bottom: 1px solid color-mix(in oklab, currentColor 22%, transparent);
+	font-size: 0.8rem;
+}
+
+.code-language {
+	opacity: 0.8;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.copy-button {
+	font-size: 0.75rem;
+	padding: 0.15rem 0.5rem;
+}
+
+.copy-button[data-copied="true"] {
+	outline: 1px solid color-mix(in oklab, limegreen 60%, currentColor 40%);
+}
+
+code-block pre {
+	margin: 0;
+	padding: 0.75rem;
+	overflow: auto;
+}
+
+code-block code {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+	font-size: 0.84rem;
+	white-space: pre;
+}
+
+.code-line {
+	display: block;
+	padding: 0 0.35rem;
+	border-left: 3px solid transparent;
+}
+
+.diff-add {
+	background: color-mix(in oklab, limegreen 22%, transparent);
+	border-left-color: color-mix(in oklab, limegreen 55%, transparent);
+}
+
+.diff-del {
+	background: color-mix(in oklab, crimson 20%, transparent);
+	border-left-color: color-mix(in oklab, crimson 50%, transparent);
+}
+
+.diff-ctx {
+	opacity: 0.92;
+}
+
+mermaid-diagram {
+	display: block;
+	margin: 0.75rem 0;
+}
+
+.mermaid-shell {
+	padding: 0.75rem;
+	border: 1px solid color-mix(in oklab, currentColor 22%, transparent);
+	border-radius: 0.5rem;
+	background: color-mix(in oklab, canvas 90%, black 10%);
+}
+
+.mermaid-container {
+	overflow-x: auto;
+	padding: 0.4rem 0;
+}
+
+.mermaid-error {
+	margin: 0.5rem 0 0;
+}
+
+.callout {
+	padding: 0.65rem 0.75rem;
+	border-radius: 0.5rem;
+	border: 1px solid color-mix(in oklab, currentColor 22%, transparent);
+	background: color-mix(in oklab, canvas 92%, black 8%);
+}
+
+.warning {
+	padding: 0.45rem 0.6rem;
+	border-radius: 0.4rem;
+	border-left: 4px solid color-mix(in oklab, orange 55%, currentColor 45%);
+	background: color-mix(in oklab, orange 18%, transparent);
+}
+
+.grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+	gap: 0.75rem;
+}
+
+.muted {
+	opacity: 0.72;
+}
+
+.badge {
+	display: inline-block;
+	padding: 0.12rem 0.45rem;
+	border-radius: 999px;
+	font-size: 0.72rem;
+	border: 1px solid color-mix(in oklab, currentColor 24%, transparent);
+}

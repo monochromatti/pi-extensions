@@ -1,0 +1,25 @@
+{
+  "name": "@monochromatti/pi-canvas",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local in-memory collaboration canvas extension for Pi",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "test": "node --experimental-transform-types --test test/**/*.test.ts",
+    "check": "npm run test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.66.0"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  }
+}
