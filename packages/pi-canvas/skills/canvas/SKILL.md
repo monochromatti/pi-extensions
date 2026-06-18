@@ -1,3 +1,8 @@
+---
+name: canvas
+description: "Use canvas for collaborative visual work surfaces: iterative specs, section feedback, option picking, checkpoint approvals, diagrams, and code or diff display."
+---
+
 # Canvas skill
 
 ## When to use
