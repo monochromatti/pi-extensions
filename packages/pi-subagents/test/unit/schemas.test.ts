@@ -104,6 +104,18 @@ test("2.10 validates counts, concurrency, and file-only output requirements", ()
   assertInvalid({ agent: "worker", outputMode: "file-only" }, /does not configure an output file/);
   assertInvalid({ tasks: [{ agent: "worker", task: "x", outputMode: "file-only" }] }, /does not configure an output file/);
   assertInvalid({ chain: [{ agent: "worker", outputMode: "file-only" }] }, /does not configure an output file/);
+  assertInvalid({ chain: [{ parallel: [{ agent: "worker", task: "x" }], output: "false" }] }, /output options on each parallel task/);
+  assertInvalid({ chain: [{ parallel: [{ agent: "worker", task: "x" }], outputMode: "file-only" }] }, /output options on each parallel task/);
+  assertInvalid({ agent: "worker", output: "false" }, /Use "output": false/);
+  assertInvalid({ agent: "worker", output: " False " }, /Use "output": false/);
+  assertInvalid({ tasks: [{ agent: "worker", task: "x", output: "false" }] }, /Use "output": false/);
+  assertInvalid({ chain: [{ agent: "worker", output: "false" }] }, /Use "output": false/);
+  assertInvalid({ chain: [{ parallel: [{ agent: "worker", task: "x", output: "false" }] }] }, /Use "output": false/);
+
+  assertValid({ agent: "worker", output: false });
+  assertValid({ tasks: [{ agent: "worker", task: "x", output: false }] });
+  assertValid({ chain: [{ agent: "worker", output: false }] });
+  assertValid({ chain: [{ parallel: [{ agent: "worker", task: "x", output: false }] }] });
 });
 
 test("2.11 schema and tool descriptions do not advertise removed features", () => {

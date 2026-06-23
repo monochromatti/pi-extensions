@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { captureSingleOutputSnapshot } from "../../src/runs/shared/single-output.ts";
+import { captureSingleOutputSnapshot, resolveSingleOutputPath } from "../../src/runs/shared/single-output.ts";
 import { finalizeChildOutput } from "../../src/runs/shared/output-finalizer.ts";
 
 function tempDir(): string {
@@ -49,7 +49,18 @@ test("2.5/2.6 successful output path reads changed saved content and returns ref
 	}
 });
 
-test("2.7/2.8 file-only mode displays reference without full output", () => {
+test("2.7/2.8 rejects string false output paths at sink", () => {
+	assert.throws(
+		() => resolveSingleOutputPath("false" as never, process.cwd()),
+		/Invalid output path "false"; use boolean false/,
+	);
+	assert.throws(
+		() => resolveSingleOutputPath(" False " as never, process.cwd()),
+		/Invalid output path "false"; use boolean false/,
+	);
+});
+
+test("2.9/2.10 file-only mode displays reference without full output", () => {
 	const dir = tempDir();
 	try {
 		const outputPath = path.join(dir, "child-output.md");

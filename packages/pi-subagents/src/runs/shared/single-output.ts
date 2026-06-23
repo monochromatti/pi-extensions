@@ -8,11 +8,16 @@ export interface SingleOutputSnapshot {
 	size?: number;
 }
 
+function isStringFalseOutput(output: unknown): boolean {
+	return typeof output === "string" && output.trim().toLowerCase() === "false";
+}
+
 export function resolveSingleOutputPath(
 	output: string | false | undefined,
 	runtimeCwd: string,
 	requestedCwd?: string,
 ): string | undefined {
+	if (isStringFalseOutput(output)) throw new Error('Invalid output path "false"; use boolean false to disable file output.');
 	if (typeof output !== "string" || !output) return undefined;
 	if (path.isAbsolute(output)) return output;
 	const baseCwd = requestedCwd

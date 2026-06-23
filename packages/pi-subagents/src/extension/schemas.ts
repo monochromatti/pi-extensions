@@ -22,7 +22,7 @@ const OutputOverride = Type.Unsafe({
 		{ type: "string" },
 		{ type: "boolean" },
 	],
-	description: "Output filename/path, or false to disable file output",
+	description: "Output file path. Omit for inline result. Use true for agent default output path, or boolean false (not string \"false\") to disable file output.",
 });
 
 const OutputModeOverride = Type.String({
@@ -166,7 +166,14 @@ function findRemovedField(value: unknown): (typeof REMOVED_FIELDS)[number] | und
 	return undefined;
 }
 
-function validateOutputMode(value: Record<string, unknown>, context: string): string | undefined {
+function isStringFalse(value: unknown): boolean {
+	return typeof value === "string" && value.trim().toLowerCase() === "false";
+}
+
+function validateOutputOptions(value: Record<string, unknown>, context: string): string | undefined {
+	if (isStringFalse(value.output)) {
+		return `${context} sets output as string "false". Use "output": false, not "output": "false".`;
+	}
 	if (value.outputMode === "file-only" && typeof value.output !== "string") {
 		return `${context} sets outputMode: "file-only" but does not configure an output file. Set output to a path or use outputMode: "inline".`;
 	}
@@ -191,7 +198,7 @@ function validateParallelTask(value: unknown, context: string, taskRequired: boo
 	if (!isRecord(value)) return `${context} must be an object`;
 	if (typeof value.agent !== "string" || value.agent.trim() === "") return `${context} agent must be a non-empty string`;
 	if (taskRequired && (typeof value.task !== "string" || value.task.trim() === "")) return `${context} task must be a non-empty string`;
-	return validateCount(value, context) ?? validateOutputMode(value, context);
+	return validateCount(value, context) ?? validateOutputOptions(value, context);
 }
 
 function validateChainStep(value: unknown, index: number): string | undefined {
@@ -202,6 +209,7 @@ function validateChainStep(value: unknown, index: number): string | undefined {
 	if (hasParallel && hasAgent) return `${context} must be either sequential or parallel, not both`;
 	if (!hasParallel && !hasAgent) return `${context} must specify agent or parallel tasks`;
 	if (hasParallel) {
+		if (value.output !== undefined || value.outputMode !== undefined) return `${context} parallel step must set output options on each parallel task, not on the step container`;
 		const tasks = value.parallel as unknown[];
 		if (tasks.length === 0) return `${context}.parallel must contain at least one task`;
 		const concurrencyError = validateConcurrency(value, context);
@@ -212,7 +220,7 @@ function validateChainStep(value: unknown, index: number): string | undefined {
 		}
 		return undefined;
 	}
-	return validateOutputMode(value, context);
+	return validateOutputOptions(value, context);
 }
 
 export function validateSubagentParams(input: unknown): SubagentValidationResult {
@@ -252,7 +260,7 @@ export function validateSubagentParams(input: unknown): SubagentValidationResult
 
 	const topConcurrencyError = validateConcurrency(input, "top-level");
 	if (topConcurrencyError) return { ok: false, error: topConcurrencyError };
-	const topOutputError = validateOutputMode(input, "single run");
+	const topOutputError = validateOutputOptions(input, "single run");
 	if (topOutputError) return { ok: false, error: topOutputError };
 
 	if (input.agent !== undefined && (typeof input.agent !== "string" || input.agent.trim() === "")) {
