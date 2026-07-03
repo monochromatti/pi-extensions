@@ -180,11 +180,126 @@
 		}
 	}
 
+	const MARKED_VERSION = "12.0.2";
+	const MARKED_SRC = `https://cdn.jsdelivr.net/npm/marked@${MARKED_VERSION}/marked.min.js`;
+	let markedLoadPromise;
+
+	function getMarkedApi() {
+		const existing = globalThis.marked;
+		if (existing && typeof existing.parse === "function") {
+			return Promise.resolve(existing);
+		}
+
+		if (!markedLoadPromise) {
+			markedLoadPromise = new Promise((resolve) => {
+				try {
+					const script = document.createElement("script");
+					script.src = MARKED_SRC;
+					script.async = true;
+					script.crossOrigin = "anonymous";
+					script.dataset.piCanvasMarked = "1";
+					script.onload = () => {
+						const api = globalThis.marked;
+						resolve(api && typeof api.parse === "function" ? api : null);
+					};
+					script.onerror = () => resolve(null);
+					document.head.appendChild(script);
+				} catch {
+					resolve(null);
+				}
+			});
+		}
+
+		return markedLoadPromise;
+	}
+
+	const MARKDOWN_BLOCKED_TAGS = new Set([
+		"script",
+		"style",
+		"iframe",
+		"object",
+		"embed",
+		"link",
+		"meta",
+		"base",
+		"form",
+	]);
+
+	// Mirrors the server-side sanitizer rules for HTML that marked re-derives
+	// from markdown source (raw HTML passthrough, javascript: links, inline
+	// handlers). CSP is the backstop for asset origins.
+	function sanitizeMarkdownFragment(root) {
+		const elements = [...root.querySelectorAll("*")];
+		for (const element of elements) {
+			if (MARKDOWN_BLOCKED_TAGS.has(element.localName)) {
+				element.remove();
+				continue;
+			}
+			for (const attribute of [...element.attributes]) {
+				const name = attribute.name.toLowerCase();
+				if (name.startsWith("on") || name === "style" || name === "srcdoc") {
+					element.removeAttribute(attribute.name);
+					continue;
+				}
+				if (name === "href" || name === "src" || name === "xlink:href") {
+					const value = attribute.value.replace(/[\u0000-\u0020]+/g, "").toLowerCase();
+					if (value.startsWith("javascript:") || value.startsWith("data:text/html")) {
+						element.removeAttribute(attribute.name);
+					}
+				}
+			}
+		}
+	}
+
+	class MarkdownBlockElement extends HTMLElement {
+		connectedCallback() {
+			void this.render();
+		}
+
+		async render() {
+			const source = this.textContent || "";
+
+			this.replaceChildren();
+			this.classList.add("markdown-block");
+
+			const body = document.createElement("div");
+			body.className = "markdown-body";
+			this.appendChild(body);
+
+			const marked = await getMarkedApi();
+			if (!this.isConnected) return;
+
+			if (!marked || typeof marked.parse !== "function") {
+				const fallback = document.createElement("pre");
+				fallback.className = "markdown-fallback";
+				fallback.textContent = source;
+				body.replaceChildren(fallback);
+				return;
+			}
+
+			try {
+				const html = marked.parse(source, { async: false, gfm: true, breaks: false });
+				const parsed = new DOMParser().parseFromString(typeof html === "string" ? html : "", "text/html");
+				sanitizeMarkdownFragment(parsed.body);
+				body.replaceChildren(...parsed.body.childNodes);
+			} catch {
+				const fallback = document.createElement("pre");
+				fallback.className = "markdown-fallback";
+				fallback.textContent = source;
+				body.replaceChildren(fallback);
+			}
+		}
+	}
+
 	if (!customElements.get("code-block")) {
 		customElements.define("code-block", CodeBlockElement);
 	}
 
 	if (!customElements.get("mermaid-diagram")) {
 		customElements.define("mermaid-diagram", MermaidDiagramElement);
+	}
+
+	if (!customElements.get("markdown-block")) {
+		customElements.define("markdown-block", MarkdownBlockElement);
 	}
 })();

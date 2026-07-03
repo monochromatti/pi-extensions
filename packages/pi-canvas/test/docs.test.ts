@@ -25,15 +25,16 @@ test("7.1 SKILL.md documents required canvas guidance sections", () => {
 		"When to use",
 		"Mental model",
 		"Tool reference",
-		"render",
-		"read_signals",
-		"wait_for_event",
+		"canvas_render",
+		"canvas_read_signals",
+		"canvas_wait_for_event",
 		"Allowed selectors",
 		"#root",
 		"#status",
 		"#sidebar",
 		"#canvas-",
 		"data-canvas-slot",
+		"data-signal",
 		"Render modes",
 		"inner",
 		"outer",
@@ -45,6 +46,7 @@ test("7.1 SKILL.md documents required canvas guidance sections", () => {
 		"checkpoint",
 		"Signal naming",
 		"Snippets",
+		"<markdown-block>",
 		"<mermaid-diagram>",
 		"<code-block",
 		"language=\"diff\"",
@@ -54,6 +56,10 @@ test("7.1 SKILL.md documents required canvas guidance sections", () => {
 	]) {
 		expectContains(skill, required);
 	}
+
+	// Regression: the client only reads data-signal; documenting data-bind
+	// produced dead UI that silently synced nothing.
+	assert.doesNotMatch(skill, /data-bind/);
 });
 
 test("7.3 README documents install/use, /canvas, security policy, tests, and MVP demo", () => {

@@ -9,7 +9,7 @@ function createFakePi() {
 	const tools: Array<{ name: string; execute?: (...args: unknown[]) => Promise<unknown> }> = [];
 	const commands: Array<{ name: string; handler?: (...args: unknown[]) => Promise<unknown> }> = [];
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
-	const sendUserMessages: Array<{ message: string; options?: { deliverAs?: "steer" } }> = [];
+	const sendUserMessages: Array<{ message: string; options?: { deliverAs?: "steer" | "followUp" } }> = [];
 	const pi = {
 		registerTool(tool: { name: string; execute?: (...args: unknown[]) => Promise<unknown> }) {
 			tools.push(tool);
@@ -20,7 +20,7 @@ function createFakePi() {
 		on(name: string, handler: (...args: unknown[]) => unknown) {
 			handlers.set(name, handler);
 		},
-		sendUserMessage(message: string, options?: { deliverAs?: "steer" }) {
+		sendUserMessage(message: string, options?: { deliverAs?: "steer" | "followUp" }) {
 			sendUserMessages.push({ message, options });
 		},
 	};
@@ -48,17 +48,16 @@ test("1.3 extension registers /canvas and only canvas tool surface", () => {
 	assert.deepEqual(fake.commands.map((command) => command.name), ["canvas", "canvas-demo"]);
 	assert.deepEqual(
 		fake.tools.map((tool) => tool.name).sort(),
-		["read_signals", "render", "wait_for_event"],
+		["canvas_read_signals", "canvas_render", "canvas_wait_for_event"],
 	);
 });
 
 test("1.4 /canvas-demo opens canvas and queues showcase patches", async () => {
 	const fake = createFakePi();
-	registerCanvasExtension(fake.pi);
+	registerCanvasExtension(fake.pi, { openBrowser: async () => {} });
 
 	const canvasDemo = fake.getCommand("canvas-demo");
 	assert.ok(canvasDemo?.handler);
-
 	try {
 		const result = (await canvasDemo.handler?.([], { ui: {} })) as { ok: boolean; url?: string };
 		assert.equal(result.ok, true);
@@ -75,7 +74,7 @@ test("1.4 /canvas-demo opens canvas and queues showcase patches", async () => {
 		};
 
 		assert.equal(patchesBody.patches.some((patch) => patch.selector === "#status" && /Pi Canvas demo/.test(patch.html)), true);
-		assert.equal(patchesBody.patches.some((patch) => patch.selector === "#root" && /<mermaid-diagram>/.test(patch.html)), true);
+		assert.equal(patchesBody.patches.some((patch) => patch.selector === "#root" && /<markdown-block>/.test(patch.html) && /<mermaid-diagram>/.test(patch.html)), true);
 		assert.equal(patchesBody.patches.some((patch) => patch.selector === "#sidebar" && /data-event="checkpoint:approve_demo"/.test(patch.html)), true);
 	} finally {
 		await fake.emit("session_shutdown", {}, {});
@@ -86,7 +85,7 @@ test("2.4 read_signals tool reads in-memory session state without steering", asy
 	const fake = createFakePi();
 	registerCanvasExtension(fake.pi);
 
-	const readSignalsTool = fake.tools.find((tool) => tool.name === "read_signals");
+	const readSignalsTool = fake.tools.find((tool) => tool.name === "canvas_read_signals");
 	assert.ok(readSignalsTool?.execute);
 
 	const result = await readSignalsTool.execute?.("id", undefined);
@@ -98,7 +97,7 @@ test("2.6 wait_for_event tool wired to event runtime and returns timeout payload
 	const fake = createFakePi();
 	registerCanvasExtension(fake.pi);
 
-	const waitTool = fake.tools.find((tool) => tool.name === "wait_for_event");
+	const waitTool = fake.tools.find((tool) => tool.name === "canvas_wait_for_event");
 	assert.ok(waitTool?.execute);
 
 	const result = await waitTool.execute?.("id", { name: "approve", timeoutMs: 5 });
@@ -110,7 +109,7 @@ test("4.4 render tool wired to render runtime and returns queued patch payload",
 	const fake = createFakePi();
 	registerCanvasExtension(fake.pi);
 
-	const renderTool = fake.tools.find((tool) => tool.name === "render");
+	const renderTool = fake.tools.find((tool) => tool.name === "canvas_render");
 	assert.ok(renderTool?.execute);
 
 	const result = await renderTool.execute?.("id", {
@@ -173,7 +172,7 @@ test("6.1/6.2 /canvas starts server if needed, prints URL, opens browser first t
 		{ message: "Canvas URL: http://127.0.0.1:43210/?token=test-token", level: "info" },
 		{
 			message:
-				"Canvas workflow: use render(selector, html, mode), read_signals(), wait_for_event(). Canvas temporary; summarize important feedback in chat.",
+				"Canvas workflow: use canvas_render(selector, html, mode), canvas_read_signals(), canvas_wait_for_event(). Canvas is temporary; summarize important feedback in chat.",
 			level: "info",
 		},
 		{ message: "open:http://127.0.0.1:43210/?token=test-token" },
@@ -226,9 +225,9 @@ test("6.3/6.4 second /canvas call reuses same server url and does not reopen bro
 	});
 	assert.deepEqual(messages, [
 		"Canvas URL: http://127.0.0.1:48123/?token=token-1",
-		"Canvas workflow: use render(selector, html, mode), read_signals(), wait_for_event(). Canvas temporary; summarize important feedback in chat.",
+		"Canvas workflow: use canvas_render(selector, html, mode), canvas_read_signals(), canvas_wait_for_event(). Canvas is temporary; summarize important feedback in chat.",
 		"Canvas URL: http://127.0.0.1:48123/?token=token-1",
-		"Canvas workflow: use render(selector, html, mode), read_signals(), wait_for_event(). Canvas temporary; summarize important feedback in chat.",
+		"Canvas workflow: use canvas_render(selector, html, mode), canvas_read_signals(), canvas_wait_for_event(). Canvas is temporary; summarize important feedback in chat.",
 	]);
 });
 
@@ -310,9 +309,9 @@ test("6.9/6.10 /canvas prints workflow guidance after url as fallback prompt inj
 	assert.equal(messages.length >= 2, true);
 	assert.equal(messages[0], "Canvas URL: http://127.0.0.1:49111/?token=guide");
 	assert.match(messages[1] ?? "", /Canvas workflow:/);
-	assert.match(messages[1] ?? "", /render\(selector, html, mode\)/);
-	assert.match(messages[1] ?? "", /read_signals\(\)/);
-	assert.match(messages[1] ?? "", /wait_for_event\(\)/);
+	assert.match(messages[1] ?? "", /canvas_render\(selector, html, mode\)/);
+	assert.match(messages[1] ?? "", /canvas_read_signals\(\)/);
+	assert.match(messages[1] ?? "", /canvas_wait_for_event\(\)/);
 });
 
 test("6.11 startServer failure returns {ok:false,error} and reports UI error without throw", async () => {
@@ -426,7 +425,7 @@ test("6.7/6.8 explicit attention + checkpoint send concise transcript messages; 
 		},
 		{
 			message: "Canvas checkpoint: approve scope (submit)",
-			options: undefined,
+			options: { deliverAs: "followUp" },
 		},
 	]);
 });
@@ -434,7 +433,7 @@ test("6.7/6.8 explicit attention + checkpoint send concise transcript messages; 
 test("8.5/8.6 /canvas smoke: command starts live server, serves shell, then restarts after shutdown", async () => {
 	const fake = createFakePi();
 	const lines: string[] = [];
-	registerCanvasExtension(fake.pi);
+	registerCanvasExtension(fake.pi, { openBrowser: async () => {} });
 
 	const canvas = fake.getCommand("canvas");
 	assert.ok(canvas?.handler);
@@ -471,4 +470,59 @@ test("8.5/8.6 /canvas smoke: command starts live server, serves shell, then rest
 	assert.equal(secondLive.status, 200);
 
 	await fake.emit("session_shutdown", {}, {});
+});
+
+test("6.12 /canvas stop stops the server, resets browser open, and restart reopens", async () => {
+	const fake = createFakePi();
+	let startServerCalls = 0;
+	let stopCalls = 0;
+	let openBrowserCalls = 0;
+	const notices: Array<{ message: string; level?: string }> = [];
+
+	registerCanvasExtension(fake.pi, {
+		async startServer() {
+			startServerCalls += 1;
+			return {
+				host: "127.0.0.1",
+				port: 49500,
+				baseUrl: "http://127.0.0.1:49500",
+				url: "http://127.0.0.1:49500/?token=stop-test",
+				stop: async () => {
+					stopCalls += 1;
+				},
+			};
+		},
+		async openBrowser() {
+			openBrowserCalls += 1;
+		},
+	});
+
+	const canvas = fake.getCommand("canvas");
+	assert.ok(canvas?.handler);
+	const ctx = {
+		ui: {
+			notify(message: string, level?: string) {
+				notices.push({ message, level });
+			},
+		},
+	};
+
+	await canvas.handler?.("", ctx);
+	assert.equal(startServerCalls, 1);
+
+	const stopped = await canvas.handler?.("stop", ctx);
+	assert.deepEqual(stopped, { ok: true, stopped: true });
+	assert.equal(stopCalls, 1);
+	assert.ok(notices.some((entry) => entry.message === "Canvas stopped."));
+
+	// Stopping when idle is a no-op, not an error.
+	const stoppedAgain = await canvas.handler?.("STOP", ctx);
+	assert.deepEqual(stoppedAgain, { ok: true, stopped: true });
+	assert.equal(stopCalls, 1);
+
+	const restarted = (await canvas.handler?.("", ctx)) as { ok: boolean; reused?: boolean };
+	assert.equal(restarted.ok, true);
+	assert.equal(restarted.reused, false);
+	assert.equal(startServerCalls, 2);
+	assert.equal(openBrowserCalls, 2);
 });

@@ -24,23 +24,27 @@ Quick showcase entrypoint: `/canvas-demo`.
 
 - starts local server (`127.0.0.1`) if needed
 - prints Canvas URL in CLI
-- attempts browser open first time per session
+- opens the default browser first time per session (`$BROWSER` override respected; `xdg-open`/`open`/`start` otherwise)
 - reuses existing session canvas on later calls
 - prints fallback workflow guidance (prompt injection caveat)
+
+`/canvas stop` stops the server; the next `/canvas` restarts it and reopens the browser.
 
 `/canvas-demo` behavior:
 
 - does everything `/canvas` does
 - renders a starter showcase into `#status`, `#root`, and `#sidebar`
-- includes Mermaid, diff code block, and interactive feedback controls
+- includes markdown, Mermaid, diff code block, and interactive feedback controls
 
 ## Tool surface
 
 Only three tools exposed:
 
-- `render({ selector, html, mode })`
-- `read_signals({ keys? })`
-- `wait_for_event({ name?, timeoutMs? })`
+- `canvas_render({ selector, html, mode })`
+- `canvas_read_signals({ keys? })`
+- `canvas_wait_for_event({ name?, timeoutMs? })`
+
+Each tool carries a `promptSnippet`/`promptGuidelines`, so the model discovers the canvas workflow from the system prompt without loading the skill.
 
 ## Selectors and render modes
 
@@ -60,9 +64,16 @@ Render modes:
 
 ## Components
 
+- `<markdown-block>...` renders markdown (pinned `marked` loader, sanitized output, plain-text fallback)
 - `<code-block language="ts">...` with copy button
 - `<code-block language="diff">...` for unified diff markers
 - `<mermaid-diagram>...</mermaid-diagram>` with pinned loader path and safe fallback
+
+## Events
+
+- Quiet signal sync (`data-signal` inputs) never messages the transcript.
+- `data-event="attention:<name>"` buttons post a concise transcript summary; steers the agent mid-turn when it is streaming.
+- `data-event="checkpoint:<name>"` buttons resolve a pending `canvas_wait_for_event`; when none is pending, the checkpoint arrives as a chat message instead (never both).
 
 ## Security
 
@@ -74,6 +85,7 @@ Security posture is local-trust with explicit network constraints.
 - CSP returned on HTML/assets
 - non-allowlisted remote assets blocked by sanitizer
 - strips/rejects obvious unsafe HTML (`<script>`, `<style>`, inline handlers, `javascript:` URLs)
+- markdown rendered client-side is re-sanitized with the same rules
 
 ## Network policy
 
@@ -83,6 +95,8 @@ Current allowlisted asset origins:
 - `https://cdn.jsdelivr.net`
 - `https://unpkg.com`
 
+Scripts only load from the canvas itself plus pinned jsdelivr bundles (`mermaid`, `marked`).
+
 ## Tests
 
 Run package tests:
@@ -91,7 +105,7 @@ Run package tests:
 npm run test --workspace packages/pi-canvas
 ```
 
-Coverage currently includes session/events, server routes, render/sanitizer, browser-style integration, extension lifecycle, style/doc static checks.
+Coverage currently includes session/events, server routes (including SSE), render/sanitizer, browser-style integration, extension lifecycle, browser-opener selection, style/doc static checks.
 
 ## MVP demo script
 
@@ -123,6 +137,16 @@ Section feedback snippet:
 </section>
 ```
 
+Markdown snippet:
+
+```html
+<markdown-block>## Scope
+
+- **In**: auth flow
+- **Out**: SSO federation
+</markdown-block>
+```
+
 Diff snippet:
 
 ```html
@@ -135,9 +159,8 @@ Diff snippet:
 ## `/canvas` guidance caveat (6.10)
 
 Prompt injection API may be unavailable in host Pi runtime.
-When unavailable, `/canvas` falls back to explicit guidance line after URL (`render`, `read_signals`, `wait_for_event`).
+When unavailable, `/canvas` falls back to explicit guidance line after URL (`canvas_render`, `canvas_read_signals`, `canvas_wait_for_event`).
 
-## Current render transport (v1 simplification)
+## Render transport
 
-Browser runtime currently uses polling client (`static/client.js`) against `GET /patches`.
-Public behavior mirrors planned patch semantics; transport can move to SSE/Datastar later without changing tool API.
+Browser runtime prefers SSE (`GET /stream`) and falls back to adaptive polling against `GET /patches` when SSE is unavailable. Both paths dedupe by patch id, so append/prepend patches never double-apply.

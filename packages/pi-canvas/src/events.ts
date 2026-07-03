@@ -46,40 +46,48 @@ export async function waitForEvent(
 		return event;
 	}
 
-	return new Promise<WaitForEventResult>((resolve) => {
-		const waiter: CanvasEventWaiter = {
-			name: params?.name,
-			resolve,
-		};
+	const { promise, resolve } = Promise.withResolvers<WaitForEventResult>();
 
-		const finalize = (result: WaitForEventResult) => {
-			cleanupWaiter(session, waiter);
-			resolve(result);
-		};
+	const waiter: CanvasEventWaiter = {
+		name: params?.name,
+		resolve,
+	};
 
-		waiter.resolve = finalize;
-		session.waiters.push(waiter);
+	const finalize = (result: WaitForEventResult) => {
+		cleanupWaiter(session, waiter);
+		resolve(result);
+	};
 
-		if (typeof params?.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs >= 0) {
-			waiter.timeoutHandle = setTimeout(() => finalize({ timeout: true }), params.timeoutMs);
+	waiter.resolve = finalize;
+	session.waiters.push(waiter);
+
+	if (typeof params?.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs >= 0) {
+		waiter.timeoutHandle = setTimeout(() => finalize({ timeout: true }), params.timeoutMs);
+	}
+
+	if (params?.signal) {
+		waiter.abortSignal = params.signal;
+		waiter.abortListener = () => finalize({ timeout: true });
+		if (params.signal.aborted) {
+			waiter.abortListener();
+		} else {
+			params.signal.addEventListener("abort", waiter.abortListener, { once: true });
 		}
+	}
 
-		if (params?.signal) {
-			waiter.abortSignal = params.signal;
-			waiter.abortListener = () => finalize({ timeout: true });
-			if (params.signal.aborted) {
-				waiter.abortListener();
-			} else {
-				params.signal.addEventListener("abort", waiter.abortListener, { once: true });
-			}
-		}
-	});
+	return promise;
 }
+
+export type CheckpointPushResult = {
+	event: CanvasCheckpointEvent;
+	/** True when a pending wait_for_event call consumed the event directly. */
+	consumedByWaiter: boolean;
+};
 
 export function pushCheckpointEvent(
 	session: CanvasSessionState,
 	input: { name: string; payload?: unknown; timestamp?: string; signals?: Record<string, unknown> },
-): CanvasCheckpointEvent {
+): CheckpointPushResult {
 	const event: CanvasCheckpointEvent = {
 		name: input.name,
 		payload: input.payload,
@@ -90,11 +98,11 @@ export function pushCheckpointEvent(
 	const waiter = takeMatchingWaiter(session.waiters, event.name);
 	if (waiter) {
 		waiter.resolve(event);
-	} else {
-		session.eventQueue.push(event);
+		return { event, consumedByWaiter: true };
 	}
 
-	return event;
+	session.eventQueue.push(event);
+	return { event, consumedByWaiter: false };
 }
 
 export async function pushAttentionEvent(

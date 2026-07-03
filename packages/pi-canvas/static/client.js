@@ -11,15 +11,32 @@
 	const MAX_POLL_MS = 1000;
 	let pollDelay = MIN_POLL_MS;
 	let pollTimer;
+	let sseConnected = false;
 
 	function schedulePoll(delay) {
 		clearTimeout(pollTimer);
 		pollTimer = window.setTimeout(pollLoop, delay);
 	}
 
+	function stopPolling() {
+		clearTimeout(pollTimer);
+		pollTimer = undefined;
+	}
+
 	function pollLoop() {
+		if (sseConnected) return;
 		pollPatches();
 		schedulePoll(pollDelay);
+	}
+
+	// Single ingest point for both transports: patch ids increase strictly,
+	// so anything at or below afterId has already been applied. This keeps
+	// append/prepend patches from double-applying if SSE and a poll race.
+	function ingestPatch(patch) {
+		if (!patch || typeof patch.id !== "number" || patch.id <= afterId) return false;
+		afterId = patch.id;
+		applyPatch(patch);
+		return true;
 	}
 
 	function applyPatch(patch) {
@@ -43,6 +60,40 @@
 		}
 	}
 
+	function connectStream() {
+		if (typeof window.EventSource !== "function") {
+			pollLoop();
+			return;
+		}
+
+		const source = new EventSource(`/stream?token=${encodeURIComponent(token)}&after=${afterId}`);
+
+		source.addEventListener("open", () => {
+			sseConnected = true;
+			stopPolling();
+			document.documentElement.setAttribute("data-canvas-transport", "sse");
+		});
+
+		source.addEventListener("patch", (event) => {
+			try {
+				ingestPatch(JSON.parse(event.data));
+			} catch {
+				// ignore malformed patch payloads
+			}
+		});
+
+		source.addEventListener("error", () => {
+			// EventSource reconnects on its own; poll in the meantime so the
+			// canvas stays live even if SSE never comes back.
+			sseConnected = false;
+			document.documentElement.setAttribute("data-canvas-transport", "poll");
+			if (pollTimer === undefined) {
+				pollDelay = MIN_POLL_MS;
+				pollLoop();
+			}
+		});
+	}
+
 	function pollPatches() {
 		if (inflight) return;
 		inflight = true;
@@ -56,14 +107,14 @@
 			try {
 				const body = JSON.parse(request.responseText);
 				const patches = Array.isArray(body?.patches) ? body.patches : [];
+				let applied = 0;
 				for (const patch of patches) {
-					if (typeof patch?.id === "number") afterId = Math.max(afterId, patch.id);
-					applyPatch(patch);
+					if (ingestPatch(patch)) applied++;
 				}
-				if (patches.length > 0) {
+				if (applied > 0) {
 					// Activity: poll fast and reschedule immediately.
 					pollDelay = MIN_POLL_MS;
-					schedulePoll(MIN_POLL_MS);
+					if (!sseConnected) schedulePoll(MIN_POLL_MS);
 				} else {
 					// Idle: back off up to MAX_POLL_MS to cut request churn.
 					pollDelay = Math.min(MAX_POLL_MS, Math.round(pollDelay * 1.5));
@@ -76,7 +127,9 @@
 	}
 
 	function pokePoll() {
-		// Local interaction likely triggers a server-side patch; poll soon.
+		// Local interaction likely triggers a server-side patch; poll soon
+		// unless SSE delivers pushes already.
+		if (sseConnected) return;
 		pollDelay = MIN_POLL_MS;
 		schedulePoll(MIN_POLL_MS);
 	}
@@ -170,5 +223,6 @@
 		pokePoll();
 	}, true);
 
+	connectStream();
 	pollLoop();
 })();

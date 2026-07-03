@@ -252,3 +252,93 @@ test("3.11 /event/attention/:name calls callback and does not resolve checkpoint
 	const checkpointResult = await checkpointWaiter;
 	assert.deepEqual(checkpointResult, { timeout: true });
 });
+
+test("4.5 /stream requires token and delivers backlog + live patches as SSE", async (t) => {
+	const session = createCanvasSession();
+	const runtime = await startCanvasServer(session);
+	t.after(async () => {
+		await runtime.stop();
+	});
+
+	const unauthorized = await fetch(`${runtime.baseUrl}/stream`);
+	assert.equal(unauthorized.status, 401);
+
+	renderToCanvas(session, { selector: "#status", html: "<p>backlog</p>", mode: "inner" });
+
+	const controller = new AbortController();
+	t.after(() => controller.abort());
+	const response = await fetch(`${runtime.baseUrl}/stream?token=${session.token}`, {
+		signal: controller.signal,
+	});
+	assert.equal(response.status, 200);
+	assert.match(response.headers.get("content-type") ?? "", /^text\/event-stream/);
+	assert.ok(response.body);
+
+	const reader = response.body!.getReader();
+	const decoder = new TextDecoder();
+	let buffer = "";
+	const readEvents = async (expectedCount: number): Promise<Array<{ id: number; selector: string; html: string }>> => {
+		const events: Array<{ id: number; selector: string; html: string }> = [];
+		while (events.length < expectedCount) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			buffer += decoder.decode(value, { stream: true });
+			let boundary = buffer.indexOf("\n\n");
+			while (boundary >= 0) {
+				const frame = buffer.slice(0, boundary);
+				buffer = buffer.slice(boundary + 2);
+				boundary = buffer.indexOf("\n\n");
+				const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+				if (!frame.includes("event: patch") || !dataLine) continue;
+				events.push(JSON.parse(dataLine.slice("data: ".length)) as { id: number; selector: string; html: string });
+			}
+		}
+		return events;
+	};
+
+	const backlog = await readEvents(1);
+	assert.equal(backlog.length, 1);
+	assert.deepEqual(
+		{ selector: backlog[0]!.selector, html: backlog[0]!.html },
+		{ selector: "#status", html: "<p>backlog</p>" },
+	);
+
+	renderToCanvas(session, { selector: "#status", html: "<p>live</p>", mode: "append" });
+	const live = await readEvents(1);
+	assert.equal(live.length, 1);
+	assert.deepEqual({ selector: live[0]!.selector, html: live[0]!.html }, { selector: "#status", html: "<p>live</p>" });
+	assert.equal(live[0]!.id > backlog[0]!.id, true);
+});
+
+test("3.10 checkpoint consumed by a waiter does not invoke onCheckpoint; unconsumed does", async (t) => {
+	const session = createCanvasSession();
+	const checkpointSummaries: string[] = [];
+	const runtime = await startCanvasServer(session, {
+		onCheckpoint: (summary) => {
+			checkpointSummaries.push(summary);
+		},
+	});
+	t.after(async () => {
+		await runtime.stop();
+	});
+
+	const pending = waitForEvent(session, { name: "approve", timeoutMs: 1_000 });
+	const consumed = await fetch(`${runtime.baseUrl}/event/checkpoint/approve?token=${session.token}`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ payload: { source: "button" } }),
+	});
+	assert.equal(consumed.status, 200);
+	const resolved = await pending;
+	assert.equal("timeout" in resolved, false);
+	assert.deepEqual(checkpointSummaries, []);
+
+	const unconsumed = await fetch(`${runtime.baseUrl}/event/checkpoint/approve_later?token=${session.token}`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ payload: { source: "button" } }),
+	});
+	assert.equal(unconsumed.status, 200);
+	assert.deepEqual(checkpointSummaries, ["Canvas checkpoint: approve_later"]);
+	assert.equal(session.eventQueue.length, 1);
+});

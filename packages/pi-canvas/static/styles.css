@@ -91,6 +91,62 @@ mermaid-diagram {
 	margin: 0.5rem 0 0;
 }
 
+markdown-block {
+	display: block;
+	margin: 0.75rem 0;
+}
+
+.markdown-body > :first-child {
+	margin-top: 0;
+}
+
+.markdown-body > :last-child {
+	margin-bottom: 0;
+}
+
+.markdown-body blockquote {
+	margin: 0.75rem 0;
+	padding: 0.35rem 0.75rem;
+	border-left: 3px solid color-mix(in oklab, currentColor 30%, transparent);
+	opacity: 0.9;
+}
+
+.markdown-body table {
+	border-collapse: collapse;
+	margin: 0.75rem 0;
+}
+
+.markdown-body th,
+.markdown-body td {
+	border: 1px solid color-mix(in oklab, currentColor 24%, transparent);
+	padding: 0.3rem 0.6rem;
+}
+
+.markdown-body code {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+	font-size: 0.86em;
+	padding: 0.08rem 0.3rem;
+	border-radius: 0.3rem;
+	background: color-mix(in oklab, canvas 86%, black 14%);
+}
+
+.markdown-body pre {
+	padding: 0.75rem;
+	border-radius: 0.5rem;
+	border: 1px solid color-mix(in oklab, currentColor 24%, transparent);
+	background: color-mix(in oklab, canvas 86%, black 14%);
+	overflow: auto;
+}
+
+.markdown-body pre code {
+	padding: 0;
+	background: none;
+}
+
+.markdown-fallback {
+	white-space: pre-wrap;
+}
+
 .callout {
 	padding: 0.65rem 0.75rem;
 	border-radius: 0.5rem;

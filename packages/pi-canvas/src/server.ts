@@ -9,7 +9,7 @@ import {
 	type AttentionPolicy,
 	type CanvasCheckpointEvent,
 } from "./events.ts";
-import { getQueuedPatches } from "./render.ts";
+import { getQueuedPatches, subscribeToPatches, type CanvasPatch } from "./render.ts";
 import type { CanvasSessionState } from "./session.ts";
 import { mergeQuietSignals } from "./signals.ts";
 
@@ -52,21 +52,22 @@ export async function startCanvasServer(session: CanvasSessionState, options?: C
 	const csp = buildCanvasCsp();
 	const host = "127.0.0.1" as const;
 
+	const sseStreams = new Set<ServerResponse>();
 	const server = createServer((req, res) => {
-		void handleRequest(req, res, session, shellHtml, csp, options).catch((error) => {
+		void handleRequest(req, res, session, shellHtml, csp, sseStreams, options).catch((error) => {
 			res.statusCode = 500;
 			res.setHeader("content-type", "application/json; charset=utf-8");
 			res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
 		});
 	});
 
-	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(0, host, () => {
-			server.off("error", reject);
-			resolve();
-		});
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, host, () => {
+		server.off("error", listening.reject);
+		listening.resolve();
 	});
+	await listening.promise;
 
 	const address = server.address();
 	if (!address || typeof address === "string") {
@@ -90,16 +91,24 @@ export async function startCanvasServer(session: CanvasSessionState, options?: C
 				waiter.resolve({ timeout: true });
 			}
 			session.render.subscribers.clear();
-			server.closeAllConnections?.();
-			await new Promise<void>((resolve, reject) => {
-				server.close((error) => {
-					if (error) {
-						reject(error);
-						return;
-					}
-					resolve();
-				});
+			const closed = Promise.withResolvers<void>();
+			server.close((error) => {
+				if (error) {
+					closed.reject(error);
+					return;
+				}
+				closed.resolve();
 			});
+			// After close(): end live SSE responses explicitly (Bun's
+			// closeAllConnections doesn't reach them and would hang the close
+			// callback), then drop remaining keep-alive connections. Calling
+			// closeAllConnections before close() breaks under Bun with
+			// ERR_SERVER_NOT_RUNNING.
+			for (const stream of [...sseStreams]) {
+				stream.destroy();
+			}
+			server.closeAllConnections?.();
+			await closed.promise;
 			session.server.port = undefined;
 			session.server.url = undefined;
 		},
@@ -112,6 +121,7 @@ async function handleRequest(
 	session: CanvasSessionState,
 	shellHtml: string,
 	csp: string,
+	sseStreams: Set<ServerResponse>,
 	options?: CanvasServerOptions,
 ): Promise<void> {
 	const method = req.method ?? "GET";
@@ -166,6 +176,17 @@ async function handleRequest(
 		return;
 	}
 
+	if (method === "GET" && parsed.pathname === "/stream") {
+		if (!isAuthorized(req, parsed, session.token)) {
+			respondUnauthorized(res);
+			return;
+		}
+
+		const afterId = Number.parseInt(parsed.searchParams.get("after") ?? "0", 10);
+		startPatchStream(req, res, session, csp, Number.isFinite(afterId) ? afterId : 0, sseStreams);
+		return;
+	}
+
 	if (method === "POST" && parsed.pathname === "/sync") {
 		if (!isAllowedMutationOrigin(req)) {
 			respondForbiddenOrigin(res);
@@ -198,13 +219,15 @@ async function handleRequest(
 
 		const body = await readJsonBody(req);
 		mergeQuietSignals(session, extractSignals(body));
-		const event = pushCheckpointEvent(session, {
+		const { event, consumedByWaiter } = pushCheckpointEvent(session, {
 			name: checkpointName,
 			payload: extractPayload(body),
 			signals: { ...session.signals },
 		});
 
-		if (options?.onCheckpoint) {
+		// A pending wait_for_event already delivered this event to the agent;
+		// posting a transcript message too would double-deliver it.
+		if (!consumedByWaiter && options?.onCheckpoint) {
 			const summary = options.formatCheckpointSummary?.(event) ?? `Canvas checkpoint: ${event.name}`;
 			await options.onCheckpoint(summary, event);
 		}
@@ -280,6 +303,54 @@ function respondJson(res: ServerResponse, csp: string, payload: unknown): void {
 	res.setHeader("content-security-policy", csp);
 	res.setHeader("referrer-policy", "no-referrer");
 	res.end(JSON.stringify(payload));
+}
+
+const STREAM_HEARTBEAT_MS = 15_000;
+
+function startPatchStream(
+	req: IncomingMessage,
+	res: ServerResponse,
+	session: CanvasSessionState,
+	csp: string,
+	afterId: number,
+	sseStreams: Set<ServerResponse>,
+): void {
+	res.statusCode = 200;
+	res.setHeader("content-type", "text/event-stream");
+	res.setHeader("cache-control", "no-store");
+	res.setHeader("x-content-type-options", "nosniff");
+	res.setHeader("content-security-policy", csp);
+	res.setHeader("referrer-policy", "no-referrer");
+	res.flushHeaders?.();
+
+	let lastSentId = afterId;
+	const sendPatch = (patch: CanvasPatch) => {
+		if (patch.id <= lastSentId) return;
+		lastSentId = patch.id;
+		res.write(`event: patch\nid: ${patch.id}\ndata: ${JSON.stringify(patch)}\n\n`);
+	};
+
+	// Node runs this synchronously, so no patch can slip between the backlog
+	// replay and the live subscription; the id guard in sendPatch keeps the
+	// stream idempotent regardless.
+	const unsubscribe = subscribeToPatches(session, sendPatch);
+	for (const patch of getQueuedPatches(session, { afterId })) {
+		sendPatch(patch);
+	}
+
+	const heartbeat = setInterval(() => {
+		res.write(":ping\n\n");
+	}, STREAM_HEARTBEAT_MS);
+	heartbeat.unref?.();
+
+	sseStreams.add(res);
+	const cleanup = () => {
+		sseStreams.delete(res);
+		clearInterval(heartbeat);
+		unsubscribe();
+	};
+	res.once("close", cleanup);
+	req.once("close", cleanup);
 }
 
 function isAllowedMutationOrigin(req: IncomingMessage): boolean {

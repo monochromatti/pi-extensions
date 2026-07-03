@@ -48,6 +48,7 @@ test("2.5 wait_for_event resolves named checkpoint with payload, signals, timest
 		payload: { source: "button" },
 		timestamp: "2026-01-01T00:00:00.000Z",
 	});
+	assert.equal(checkpoint.consumedByWaiter, true);
 
 	const result = await pending;
 	assert.deepEqual(result, {
@@ -56,7 +57,7 @@ test("2.5 wait_for_event resolves named checkpoint with payload, signals, timest
 		signals: { "feedback.section.scope": "ship it" },
 		timestamp: "2026-01-01T00:00:00.000Z",
 	});
-	assert.deepEqual(result, checkpoint);
+	assert.deepEqual(result, checkpoint.event);
 	assert.deepEqual(session.waiters, []);
 });
 
@@ -110,11 +111,12 @@ test("2.9/2.10 attention event steers only when active; checkpoint never duplica
 		},
 	);
 
-	pushCheckpointEvent(session, {
+	const queued = pushCheckpointEvent(session, {
 		name: "approve",
 		payload: { source: "button" },
 		timestamp: "2026-01-01T00:00:03.000Z",
 	});
+	assert.equal(queued.consumedByWaiter, false);
 
 	assert.deepEqual(calls, [
 		{ summary: "Canvas: revise", options: { deliverAs: "steer" } },

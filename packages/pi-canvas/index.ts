@@ -1,8 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { openInBrowser } from "./src/browser.ts";
 import { waitForEvent } from "./src/events.ts";
 import { renderToCanvas } from "./src/render.ts";
-import { startCanvasServer, type CanvasServerRuntime } from "./src/server.ts";
-import { createCanvasSession } from "./src/session.ts";
+import { startCanvasServer, type CanvasServerOptions, type CanvasServerRuntime } from "./src/server.ts";
+import { createCanvasSession, type CanvasSessionState } from "./src/session.ts";
 import { readSignals } from "./src/signals.ts";
 
 type RenderParams = {
@@ -21,7 +22,7 @@ type WaitForEventParams = {
 };
 
 type CanvasCommandDeps = {
-	startServer?: (session: ReturnType<typeof createCanvasSession>, options?: Parameters<typeof startCanvasServer>[1]) => Promise<CanvasServerRuntime>;
+	startServer?: (session: CanvasSessionState, options?: CanvasServerOptions) => Promise<CanvasServerRuntime>;
 	openBrowser?: (url: string) => void | Promise<void>;
 	isAgentActive?: () => boolean;
 };
@@ -35,18 +36,43 @@ type CanvasCommandContext = {
 
 type CanvasCommandResult =
 	| { ok: true; url: string; reused: boolean }
+	| { ok: true; stopped: true }
 	| { ok: false; error: string };
+
+type CanvasMessageOptions = { deliverAs?: "steer" | "followUp" };
 
 export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCommandDeps = {}): void {
 	const session = createCanvasSession();
 	const startServer = deps.startServer ?? startCanvasServer;
-	const openBrowser = deps.openBrowser ?? (() => {});
+	const openBrowser = deps.openBrowser ?? openInBrowser;
 	let runtime: CanvasServerRuntime | undefined;
 	let openedBrowser = false;
 
+	// Track streaming state so canvas events know whether to steer the agent
+	// mid-turn or trigger a fresh turn. deps.isAgentActive overrides for tests.
+	let agentStreaming = false;
+	pi.on("agent_start", () => {
+		agentStreaming = true;
+	});
+	pi.on("agent_end", () => {
+		agentStreaming = false;
+	});
+	const isAgentActive = () => deps.isAgentActive?.() ?? agentStreaming;
+
 	pi.registerTool({
-		name: "render",
-		description: "Render HTML into canvas slot",
+		name: "canvas_render",
+		label: "Canvas render",
+		description:
+			"Render content into the local collaboration canvas the user opens with /canvas. " +
+			"Targets a slot selector (#root, #status, #sidebar, #canvas-* ids, or [data-canvas-slot=\"name\"]); " +
+			"modes: inner (default), outer, append, prepend. HTML is sanitized (no scripts/styles/handlers). " +
+			"Use <markdown-block> for prose, <code-block language=\"ts|diff|...\"> for code, <mermaid-diagram> for diagrams. " +
+			"Collect user input with data-signal attributes and buttons like data-event=\"attention:name\" or data-event=\"checkpoint:name\".",
+		promptSnippet: "canvas_render(selector, html, mode) - render UI into the local canvas the user opens with /canvas",
+		promptGuidelines: [
+			"Canvas: patch the smallest slot that changed; never replace an element containing input the user may be typing into.",
+			"Canvas: prefer <markdown-block> for prose over hand-written HTML; summarize important canvas feedback into chat before final output.",
+		],
 		parameters: {
 			type: "object",
 			properties: {
@@ -77,8 +103,12 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 	});
 
 	pi.registerTool({
-		name: "read_signals",
-		description: "Read canvas signal store",
+		name: "canvas_read_signals",
+		label: "Canvas signals",
+		description:
+			"Read the canvas signal store: current values of inputs the user edited in the canvas " +
+			"(elements with data-signal attributes). Pass keys to select specific signals; omit for all.",
+		promptSnippet: "canvas_read_signals(keys?) - read values the user typed into canvas inputs",
 		parameters: {
 			type: "object",
 			properties: {
@@ -95,8 +125,12 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 	});
 
 	pi.registerTool({
-		name: "wait_for_event",
-		description: "Wait for explicit canvas event",
+		name: "canvas_wait_for_event",
+		label: "Canvas wait",
+		description:
+			"Wait until the user clicks a canvas checkpoint button (data-event=\"checkpoint:<name>\"). " +
+			"Optional name filter and timeoutMs cap. Returns the event with a signals snapshot, or {timeout:true}.",
+		promptSnippet: "canvas_wait_for_event(name?, timeoutMs?) - block until the user clicks a canvas checkpoint button",
 		parameters: {
 			type: "object",
 			properties: {
@@ -118,8 +152,12 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 	});
 
 	pi.registerCommand("canvas", {
-		description: "Open local collaboration canvas",
-		handler: async (_args: unknown, ctx: CanvasCommandContext) => ensureCanvasRuntime(ctx),
+		description: "Open the local collaboration canvas ('/canvas stop' stops it)",
+		handler: async (args: unknown, ctx: CanvasCommandContext) => {
+			const argument = typeof args === "string" ? args.trim().toLowerCase() : "";
+			if (argument === "stop") return stopCanvasRuntime(ctx);
+			return ensureCanvasRuntime(ctx);
+		},
 	});
 
 	pi.registerCommand("canvas-demo", {
@@ -144,14 +182,16 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 			try {
 				runtime = await startServer(session, {
 					attentionPolicy: {
-						isAgentActive: () => deps.isAgentActive?.() ?? true,
+						isAgentActive,
 						formatSummary: formatAttentionSummary,
 						onAttention: async (summary, options) => {
 							sendCanvasMessage(pi, summary, options);
 						},
 					},
+					// Only fires when no canvas_wait_for_event waiter consumed the
+					// checkpoint; queue behind the current turn when streaming.
 					onCheckpoint: async (summary) => {
-						sendCanvasMessage(pi, summary);
+						sendCanvasMessage(pi, summary, isAgentActive() ? { deliverAs: "followUp" } : undefined);
 					},
 					formatCheckpointSummary,
 				});
@@ -181,10 +221,27 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 		return { ok: true, url, reused: hadRuntime };
 	}
 
-	const piWithEvents = pi as ExtensionAPI & {
-		on?: (name: string, handler: (...args: unknown[]) => unknown) => void;
-	};
-	piWithEvents.on?.("session_shutdown", async () => {
+	async function stopCanvasRuntime(ctx: CanvasCommandContext): Promise<CanvasCommandResult> {
+		if (!runtime) {
+			reportCanvasInfo(ctx, "Canvas is not running.");
+			return { ok: true, stopped: true };
+		}
+
+		try {
+			await runtime.stop();
+		} catch (error) {
+			const message = `Canvas failed to stop: ${errorMessage(error)}`;
+			reportCanvasError(ctx, message);
+			return { ok: false, error: errorMessage(error) };
+		}
+
+		runtime = undefined;
+		openedBrowser = false;
+		reportCanvasInfo(ctx, "Canvas stopped.");
+		return { ok: true, stopped: true };
+	}
+
+	pi.on("session_shutdown", async () => {
 		if (!runtime) return;
 		await runtime.stop();
 		runtime = undefined;
@@ -192,7 +249,7 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 	});
 }
 
-function renderCanvasDemo(session: ReturnType<typeof createCanvasSession>): void {
+function renderCanvasDemo(session: CanvasSessionState): void {
 	renderToCanvas(session, {
 		selector: "#status",
 		html: `<article class="callout"><strong>Pi Canvas demo</strong> <span class="badge">interactive</span></article>`,
@@ -203,10 +260,23 @@ function renderCanvasDemo(session: ReturnType<typeof createCanvasSession>): void
 		html: `<section id="canvas-overview" data-canvas-slot="overview">
 	<header>
 		<h2>Canvas Showcase</h2>
-		<p class="muted">This demo highlights semantic layout, Mermaid diagrams, code blocks, and signal/event controls.</p>
+		<p class="muted">This demo highlights markdown, Mermaid diagrams, code blocks, and signal/event controls.</p>
 	</header>
 
 	<div class="grid">
+		<article>
+			<h3>Markdown</h3>
+			<markdown-block>## Spec draft
+
+Canvas renders **markdown** natively:
+
+- headings, lists, tables
+- inline \`code\`
+- [links](https://example.com)
+
+> Quote blocks too.</markdown-block>
+		</article>
+
 		<article>
 			<h3>Workflow map</h3>
 			<mermaid-diagram>graph TD
@@ -259,22 +329,8 @@ function renderCanvasDemo(session: ReturnType<typeof createCanvasSession>): void
 	});
 }
 
-function sendCanvasMessage(
-	pi: ExtensionAPI,
-	summary: string,
-	options?: { deliverAs?: "steer" },
-): void {
-	const sender = (pi as ExtensionAPI & {
-		sendUserMessage?: (message: string, options?: { deliverAs?: "steer" }) => void;
-		sendMessage?: (message: { content: string }, options?: { triggerTurn?: boolean }) => void;
-	});
-	if (typeof sender.sendUserMessage === "function") {
-		sender.sendUserMessage(summary, options);
-		return;
-	}
-	if (typeof sender.sendMessage === "function") {
-		sender.sendMessage({ content: summary }, { triggerTurn: options?.deliverAs === "steer" });
-	}
+function sendCanvasMessage(pi: ExtensionAPI, summary: string, options?: CanvasMessageOptions): void {
+	pi.sendUserMessage(summary, options);
 }
 
 function formatAttentionSummary(event: { name: string; payload?: unknown }): string {
@@ -290,8 +346,8 @@ function formatEventName(name: string): string {
 }
 
 function formatPayloadHint(payload: unknown): string {
-	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
-	const source = (payload as { source?: unknown }).source;
+	if (!payload || typeof payload !== "object" || !("source" in payload)) return "";
+	const source = payload.source;
 	if (typeof source === "string" && source.trim().length > 0) {
 		return ` (${source.trim()})`;
 	}
@@ -299,7 +355,7 @@ function formatPayloadHint(payload: unknown): string {
 }
 
 function canvasGuidanceText(): string {
-	return "Canvas workflow: use render(selector, html, mode), read_signals(), wait_for_event(). Canvas temporary; summarize important feedback in chat.";
+	return "Canvas workflow: use canvas_render(selector, html, mode), canvas_read_signals(), canvas_wait_for_event(). Canvas is temporary; summarize important feedback in chat.";
 }
 
 function reportCanvasWarning(ctx: CanvasCommandContext, message: string): void {
@@ -307,19 +363,19 @@ function reportCanvasWarning(ctx: CanvasCommandContext, message: string): void {
 }
 
 function reportCanvasInfo(ctx: CanvasCommandContext, message: string): void {
-	if (ctx?.ui?.notify) {
+	if (ctx.ui?.notify) {
 		ctx.ui.notify(message, "info");
 		return;
 	}
-	ctx?.ui?.writeLine?.(message);
+	ctx.ui?.writeLine?.(message);
 }
 
 function reportCanvasError(ctx: CanvasCommandContext, message: string): void {
-	if (ctx?.ui?.notify) {
+	if (ctx.ui?.notify) {
 		ctx.ui.notify(message, "error");
 		return;
 	}
-	ctx?.ui?.writeLine?.(message);
+	ctx.ui?.writeLine?.(message);
 }
 
 function errorMessage(error: unknown): string {

@@ -283,3 +283,91 @@ async function waitFor(condition: () => boolean, timeoutMs = 2_000, stepMs = 25)
 	}
 	throw new Error("Condition not met before timeout");
 }
+
+test("5.8 markdown-block renders markdown via marked and sanitizes dangerous HTML", async (t) => {
+	const session = createCanvasSession();
+	const runtime = await startCanvasServer(session);
+
+	const dom = await JSDOM.fromURL(runtime.url, {
+		runScripts: "dangerously",
+		resources: "usable",
+		pretendToBeVisual: true,
+	});
+
+	t.after(async () => {
+		dom.window.close();
+		await runtime.stop();
+	});
+
+	type MarkedWindow = { marked?: { parse: (source: string, options?: unknown) => string } };
+	// jsdom's Window type doesn't model page globals; components.js reads window.marked.
+	const pageWindow = dom.window as unknown as MarkedWindow;
+	pageWindow.marked = {
+		parse: () =>
+			'<h2>Title</h2><script>window.pwned = true;</script>' +
+			'<a href="javascript:alert(1)" onclick="steal()">link</a>' +
+			'<p style="color:red">body</p><ul><li>item</li></ul>',
+	};
+
+	const rendered = renderToCanvas(session, {
+		selector: "#root",
+		html: "<markdown-block>## Title\n\n- item</markdown-block>",
+	});
+	assert.equal(rendered.ok, true);
+
+	await waitFor(() => Boolean(dom.window.document.querySelector("markdown-block .markdown-body h2")));
+
+	const body = dom.window.document.querySelector("markdown-block .markdown-body");
+	assert.ok(body);
+	assert.equal(body?.querySelector("h2")?.textContent, "Title");
+	assert.equal(body?.querySelector("li")?.textContent, "item");
+
+	assert.equal(body?.querySelector("script"), null);
+	const link = body?.querySelector("a");
+	assert.ok(link);
+	assert.equal(link?.hasAttribute("href"), false);
+	assert.equal(link?.hasAttribute("onclick"), false);
+	assert.equal(body?.querySelector("p")?.hasAttribute("style"), false);
+});
+
+test("5.9 markdown-block uses pinned jsdelivr marked loader and falls back to source text", async (t) => {
+	const session = createCanvasSession();
+	const runtime = await startCanvasServer(session);
+
+	const dom = await JSDOM.fromURL(runtime.url, {
+		runScripts: "dangerously",
+		resources: "usable",
+		pretendToBeVisual: true,
+	});
+
+	t.after(async () => {
+		dom.window.close();
+		await runtime.stop();
+	});
+
+	const originalAppendChild = dom.window.document.head.appendChild.bind(dom.window.document.head);
+	dom.window.document.head.appendChild = ((node: Node) => {
+		const script = node as HTMLScriptElement;
+		if (script.tagName === "SCRIPT" && script.dataset.piCanvasMarked === "1") {
+			setTimeout(() => script.onerror?.(new dom.window.Event("error")), 0);
+		}
+		return originalAppendChild(node);
+	}) as typeof dom.window.document.head.appendChild;
+
+	const source = "## Draft\n\nplain fallback text";
+	const rendered = renderToCanvas(session, {
+		selector: "#root",
+		html: `<markdown-block>${source}</markdown-block>`,
+	});
+	assert.equal(rendered.ok, true);
+
+	await waitFor(() => Boolean(dom.window.document.querySelector("script[data-pi-canvas-marked='1']")));
+	const loader = dom.window.document.querySelector("script[data-pi-canvas-marked='1']") as HTMLScriptElement | null;
+	assert.ok(loader);
+	assert.match(loader.src, /^https:\/\/cdn\.jsdelivr\.net\//);
+	assert.match(loader.src, /\/npm\/marked@12\.0\.2\/marked\.min\.js$/);
+
+	await waitFor(() => Boolean(dom.window.document.querySelector("markdown-block .markdown-fallback")));
+	const fallback = dom.window.document.querySelector("markdown-block .markdown-fallback");
+	assert.equal(fallback?.textContent, source);
+});
