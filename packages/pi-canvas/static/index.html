@@ -9,9 +9,14 @@
 	<body>
 		<header id="status" data-canvas-slot="status" aria-live="polite"></header>
 		<main id="root" data-canvas-slot="root">
-			<p id="canvas-empty-state">
-				Canvas is temporary work surface next to Pi chat. Ask agent to render here, or use canvas buttons to guide it.
-			</p>
+			<section id="canvas-empty-state">
+				<p class="empty-kicker">Pi Canvas</p>
+				<h1>A shared surface for working things out.</h1>
+				<p class="muted">
+					Canvas is a temporary work surface beside Pi chat. Ask the agent to sketch a spec, walk through a diff, or
+					lay out options here — then steer it with the controls it renders.
+				</p>
+			</section>
 		</main>
 		<aside id="sidebar" data-canvas-slot="sidebar"></aside>
 		<script src="/components.js" defer></script>

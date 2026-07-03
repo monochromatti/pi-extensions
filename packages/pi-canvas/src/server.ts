@@ -21,6 +21,10 @@ const STATIC_ASSETS: Record<string, { filePath: string; contentType: string }> =
 		filePath: path.join(staticDir, "styles.css"),
 		contentType: "text/css; charset=utf-8",
 	},
+	"/fonts.css": {
+		filePath: path.join(staticDir, "fonts.css"),
+		contentType: "text/css; charset=utf-8",
+	},
 	"/client.js": {
 		filePath: path.join(staticDir, "client.js"),
 		contentType: "application/javascript; charset=utf-8",

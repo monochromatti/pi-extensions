@@ -66,12 +66,16 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 			"Render content into the local collaboration canvas the user opens with /canvas. " +
 			"Targets a slot selector (#root, #status, #sidebar, #canvas-* ids, or [data-canvas-slot=\"name\"]); " +
 			"modes: inner (default), outer, append, prepend. HTML is sanitized (no scripts/styles/handlers). " +
+			"Semantic HTML is styled automatically; the only classes with styles are: card, callout, warning, success, danger, info, grid, stack, row, toolbar, field, muted, badge, btn-primary, btn-quiet. " +
 			"Use <markdown-block> for prose, <code-block language=\"ts|diff|...\"> for code, <mermaid-diagram> for diagrams. " +
-			"Collect user input with data-signal attributes and buttons like data-event=\"attention:name\" or data-event=\"checkpoint:name\".",
+			"Collect user input with data-signal attributes and buttons like data-event=\"attention:name\" or data-event=\"checkpoint:name\"; " +
+			"data-show=\"<signal key>\" and data-enable-when=\"<signal key>\" toggle visibility/enablement from signals. " +
+			"The result lists declared slots and may include design-lint warnings: fix them in your next render.",
 		promptSnippet: "canvas_render(selector, html, mode) - render UI into the local canvas the user opens with /canvas",
 		promptGuidelines: [
 			"Canvas: patch the smallest slot that changed; never replace an element containing input the user may be typing into.",
 			"Canvas: prefer <markdown-block> for prose over hand-written HTML; summarize important canvas feedback into chat before final output.",
+			"Canvas: semantic HTML is auto-styled; use only documented helper classes (inline styles are stripped) and fix any warnings canvas_render returns.",
 		],
 		parameters: {
 			type: "object",
@@ -249,35 +253,36 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 	});
 }
 
+// The demo doubles as the pattern library: every component, helper class,
+// and interaction primitive, composed the way the skill's recipes teach.
+// Keep it lint-clean — it is the exemplar agents imitate.
 function renderCanvasDemo(session: CanvasSessionState): void {
 	renderToCanvas(session, {
 		selector: "#status",
-		html: `<article class="callout"><strong>Pi Canvas demo</strong> <span class="badge">interactive</span></article>`,
+		html: `Pi Canvas demo — rendering, feedback, and checkpoints`,
 	});
 
 	renderToCanvas(session, {
 		selector: "#root",
 		html: `<section id="canvas-overview" data-canvas-slot="overview">
 	<header>
-		<h2>Canvas Showcase</h2>
-		<p class="muted">This demo highlights markdown, Mermaid diagrams, code blocks, and signal/event controls.</p>
+		<h1>Canvas showcase <span class="badge">interactive</span></h1>
+		<p class="muted">Markdown, diagrams, diffs, and structured feedback — side by side with chat.</p>
 	</header>
 
 	<div class="grid">
-		<article>
+		<article class="card">
 			<h3>Markdown</h3>
-			<markdown-block>## Spec draft
-
-Canvas renders **markdown** natively:
+			<markdown-block>Canvas renders **markdown** natively:
 
 - headings, lists, tables
 - inline \`code\`
 - [links](https://example.com)
 
-> Quote blocks too.</markdown-block>
+> Prefer this over hand-written HTML prose.</markdown-block>
 		</article>
 
-		<article>
+		<article class="card">
 			<h3>Workflow map</h3>
 			<mermaid-diagram>graph TD
 	A[Ask] --> B[Render]
@@ -286,34 +291,34 @@ Canvas renders **markdown** natively:
 	D --> E[Finalize]
 			</mermaid-diagram>
 		</article>
-
-		<article>
-			<h3>Diff example</h3>
-			<code-block language="diff">@@ -1,4 +1,5 @@
-	-Render plain text only
-	+Render semantic HTML
-	+Capture structured feedback
-	 Wait for explicit checkpoint
-	 Finalize artifact</code-block>
-		</article>
 	</div>
 
-	<article id="canvas-scope" data-canvas-slot="scope">
-		<h3>Live feedback</h3>
-		<p>Type in the sidebar, then click <strong>Revise scope</strong> or <strong>Approve demo</strong>.</p>
+	<article class="card" id="canvas-scope" data-canvas-slot="scope">
+		<h3>Proposed change <span class="badge warning">draft</span></h3>
+		<code-block language="diff">@@ -1,4 +1,5 @@
+-Render plain text only
++Render semantic HTML
++Capture structured feedback
+ Wait for explicit checkpoint
+ Finalize artifact</code-block>
+		<p class="muted">Note what should change in the sidebar, then send it back or approve.</p>
 	</article>
+
+	<aside class="callout info">
+		Checkpoint buttons hand control back to the agent; attention buttons ask it to revise while it works.
+	</aside>
 </section>`,
 	});
 
 	renderToCanvas(session, {
 		selector: "#sidebar",
 		html: `<section id="canvas-controls" data-canvas-slot="controls">
-	<h3>Controls</h3>
-	<label>
+	<h3>Your feedback</h3>
+	<label class="field">
 		Scope notes
 		<textarea data-signal="feedback.section.scope" placeholder="What should change?"></textarea>
 	</label>
-	<label>
+	<label class="field">
 		Priority
 		<select data-signal="choice.priority">
 			<option value="low">Low</option>
@@ -321,8 +326,9 @@ Canvas renders **markdown** natively:
 			<option value="high">High</option>
 		</select>
 	</label>
-	<div class="grid">
-		<button data-event="attention:revise_scope" data-payload='{"source":"demo"}'>Revise scope</button>
+	<p class="muted" data-show="feedback.section.scope">The agent will read this note when you send it.</p>
+	<div class="toolbar">
+		<button data-event="attention:revise_scope" data-payload='{"source":"demo"}' data-enable-when="feedback.section.scope">Revise scope</button>
 		<button data-event="checkpoint:approve_demo" data-payload='{"source":"demo"}'>Approve demo</button>
 	</div>
 </section>`,

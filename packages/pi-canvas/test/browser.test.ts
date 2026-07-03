@@ -22,7 +22,7 @@ test("4.9 browser-style integration: root render patch updates #root DOM", async
 	});
 
 	await waitFor(() => dom.window.document.readyState === "complete");
-	assert.match(dom.window.document.querySelector("#root")?.textContent ?? "", /Canvas is temporary work surface/);
+	assert.match(dom.window.document.querySelector("#root")?.textContent ?? "", /temporary work surface beside Pi chat/);
 
 	const rendered = renderToCanvas(session, {
 		selector: "#root",
@@ -370,4 +370,63 @@ test("5.9 markdown-block uses pinned jsdelivr marked loader and falls back to so
 	await waitFor(() => Boolean(dom.window.document.querySelector("markdown-block .markdown-fallback")));
 	const fallback = dom.window.document.querySelector("markdown-block .markdown-fallback");
 	assert.equal(fallback?.textContent, source);
+});
+
+test("5.10 data-show and data-enable-when react to signal edits without expressions", async (t) => {
+	const session = createCanvasSession();
+	const runtime = await startCanvasServer(session);
+
+	const dom = await JSDOM.fromURL(runtime.url, {
+		runScripts: "dangerously",
+		resources: "usable",
+		pretendToBeVisual: true,
+	});
+
+	t.after(async () => {
+		dom.window.close();
+		await runtime.stop();
+	});
+
+	const rendered = renderToCanvas(session, {
+		selector: "#root",
+		html: `
+			<section>
+				<textarea id="notes" data-signal="feedback.notes"></textarea>
+				<p id="hint" data-show="feedback.notes">will send</p>
+				<p id="nudge" data-show="!feedback.notes">type something</p>
+				<button id="send" data-event="attention:send" data-enable-when="feedback.notes">Send</button>
+				<p id="ignored" data-show="feedback.notes == 'x'">never toggled</p>
+			</section>
+		`,
+	});
+	assert.equal(rendered.ok, true);
+
+	await waitFor(() => Boolean(dom.window.document.querySelector("#send")));
+	const hint = dom.window.document.querySelector("#hint") as HTMLElement;
+	const nudge = dom.window.document.querySelector("#nudge") as HTMLElement;
+	const send = dom.window.document.querySelector("#send") as HTMLButtonElement;
+	const ignored = dom.window.document.querySelector("#ignored") as HTMLElement;
+	const notes = dom.window.document.querySelector("#notes") as HTMLTextAreaElement;
+
+	// Initial pass after the patch applies: empty signal hides/disables.
+	assert.equal(hint.hidden, true);
+	assert.equal(nudge.hidden, false);
+	assert.equal(send.disabled, true);
+	assert.equal(ignored.hidden, false);
+
+	notes.value = "tighter scope";
+	notes.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+
+	await waitFor(() => hint.hidden === false);
+	assert.equal(nudge.hidden, true);
+	assert.equal(send.disabled, false);
+	// Malformed expression stays inert.
+	assert.equal(ignored.hidden, false);
+
+	notes.value = "";
+	notes.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+
+	await waitFor(() => hint.hidden === true);
+	assert.equal(nudge.hidden, false);
+	assert.equal(send.disabled, true);
 });

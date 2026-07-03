@@ -1,4 +1,19 @@
 (() => {
+	// Webfonts load after first paint so an offline or slow CDN never blocks
+	// the canvas; fallback stacks in styles.css cover the gap.
+	function loadFontsStylesheet() {
+		const link = document.createElement("link");
+		link.rel = "stylesheet";
+		link.href = "/fonts.css";
+		document.head.appendChild(link);
+	}
+
+	if (document.readyState === "complete") {
+		loadFontsStylesheet();
+	} else {
+		window.addEventListener("load", loadFontsStylesheet, { once: true });
+	}
+
 	function classifyDiffLine(line) {
 		if (line.startsWith("+")) return "diff-add";
 		if (line.startsWith("-")) return "diff-del";
@@ -159,7 +174,12 @@
 
 			try {
 				if (!mermaidInitialized && typeof mermaid.initialize === "function") {
-					mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
+					const prefersDark = typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: dark)").matches;
+					mermaid.initialize({
+						startOnLoad: false,
+						securityLevel: "strict",
+						theme: prefersDark ? "dark" : "neutral",
+					});
 					mermaidInitialized = true;
 				}
 

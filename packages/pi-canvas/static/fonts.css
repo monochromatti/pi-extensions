@@ -1,0 +1,11 @@
+/*
+ * Webfonts for the canvas design system, pinned to jsdelivr (an allowlisted
+ * asset origin). Loaded asynchronously by components.js after window load so
+ * a slow or absent network never blocks first paint — styles.css declares
+ * fallback stacks and fontsource ships font-display: swap.
+ */
+
+@import url("https://cdn.jsdelivr.net/npm/@fontsource-variable/fraunces@5/index.css");
+@import url("https://cdn.jsdelivr.net/npm/@fontsource-variable/karla@5/index.css");
+@import url("https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5/400.css");
+@import url("https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5/500.css");

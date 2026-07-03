@@ -58,6 +58,42 @@
 			default:
 				target.innerHTML = html;
 		}
+		updateReactiveBindings();
+	}
+
+	// Declarative visibility/enablement bound to the signal store. Only bare
+	// signal keys (optionally negated with "!") are accepted -- no expression
+	// evaluation, so agent HTML never executes logic.
+	const REACTIVE_KEY_PATTERN = /^!?[a-z0-9_.-]+$/i;
+
+	function parseReactiveKey(raw) {
+		if (typeof raw !== "string") return undefined;
+		const value = raw.trim();
+		if (!REACTIVE_KEY_PATTERN.test(value)) return undefined;
+		const negated = value.startsWith("!");
+		return { key: negated ? value.slice(1) : value, negated };
+	}
+
+	function isTruthySignal(value) {
+		if (value === undefined || value === null || value === false) return false;
+		if (typeof value === "string") return value.trim().length > 0;
+		if (Array.isArray(value)) return value.length > 0;
+		return true;
+	}
+
+	function updateReactiveBindings() {
+		for (const element of document.querySelectorAll("[data-show]")) {
+			const parsed = parseReactiveKey(element.getAttribute("data-show"));
+			if (!parsed) continue;
+			const on = isTruthySignal(signals[parsed.key]) !== parsed.negated;
+			element.hidden = !on;
+		}
+		for (const element of document.querySelectorAll("[data-enable-when]")) {
+			const parsed = parseReactiveKey(element.getAttribute("data-enable-when"));
+			if (!parsed) continue;
+			if (!("disabled" in element)) continue;
+			element.disabled = isTruthySignal(signals[parsed.key]) === parsed.negated;
+		}
 	}
 
 	function connectStream() {
@@ -197,11 +233,13 @@
 
 	document.addEventListener("input", (event) => {
 		if (!maybeCaptureSignal(event.target)) return;
+		updateReactiveBindings();
 		syncSignals();
 	}, true);
 
 	document.addEventListener("change", (event) => {
 		if (!maybeCaptureSignal(event.target)) return;
+		updateReactiveBindings();
 		syncSignals();
 	}, true);
 

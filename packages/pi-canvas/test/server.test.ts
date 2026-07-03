@@ -52,7 +52,7 @@ test("3.3 shell includes stable slots + empty-state copy; 3.4 html route headers
 	assert.match(html, /id="root"/);
 	assert.match(html, /id="sidebar"/);
 	assert.match(html, /<link[^>]+rel="stylesheet"[^>]+href="\/styles\.css"/);
-	assert.match(html, /Canvas is temporary work surface next to Pi chat/);
+	assert.match(html, /temporary work surface beside Pi chat/);
 });
 
 test("3.5 static assets served with CSP matching allowlist", async (t) => {

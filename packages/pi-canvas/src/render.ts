@@ -1,3 +1,4 @@
+import { lintCanvasHtml } from "./lint.ts";
 import { sanitizeCanvasHtml } from "./security.ts";
 import type { CanvasSessionState } from "./session.ts";
 
@@ -15,6 +16,7 @@ export type CanvasRenderRuntime = {
 	patches: CanvasPatch[];
 	nextPatchId: number;
 	rootRendered: boolean;
+	rootAppendStreak: number;
 	subscribers: Set<(patch: CanvasPatch) => void>;
 	declaredSlotNames: Set<string>;
 };
@@ -29,6 +31,10 @@ export type RenderResult =
 	| {
 			ok: true;
 			patches: CanvasPatch[];
+			/** Slot names currently declared on the canvas, for orientation before the next patch. */
+			slots: string[];
+			/** Design-lint findings; present only when something should be fixed in the next render. */
+			warnings?: string[];
 	  }
 	| {
 			ok: false;
@@ -42,6 +48,7 @@ export function createRenderRuntime(): CanvasRenderRuntime {
 		patches: [],
 		nextPatchId: 1,
 		rootRendered: false,
+		rootAppendStreak: 0,
 		subscribers: new Set(),
 		declaredSlotNames: new Set(["root", "status", "sidebar"]),
 	};
@@ -58,6 +65,10 @@ export function renderToCanvas(session: CanvasSessionState, params: RenderParams
 	}
 
 	trackDeclaredSlots(session, sanitized.html);
+
+	if (params.selector === "#root") {
+		session.render.rootAppendStreak = params.mode === "append" ? session.render.rootAppendStreak + 1 : 0;
+	}
 
 	const emitted: CanvasPatch[] = [];
 	if (params.selector === "#root" && !session.render.rootRendered) {
@@ -79,9 +90,17 @@ export function renderToCanvas(session: CanvasSessionState, params: RenderParams
 		}),
 	);
 
+	const warnings = lintCanvasHtml({
+		selector: params.selector,
+		html: params.html,
+		rootAppendStreak: session.render.rootAppendStreak,
+	});
+
 	return {
 		ok: true,
 		patches: emitted,
+		slots: [...session.render.declaredSlotNames].sort(),
+		...(warnings.length > 0 ? { warnings } : {}),
 	};
 }
 

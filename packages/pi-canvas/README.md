@@ -40,11 +40,19 @@ Quick showcase entrypoint: `/canvas-demo`.
 
 Only three tools exposed:
 
-- `canvas_render({ selector, html, mode })`
+- `canvas_render({ selector, html, mode })` — result includes declared `slots` and, when the design linter finds issues, `warnings`
 - `canvas_read_signals({ keys? })`
 - `canvas_wait_for_event({ name?, timeoutMs? })`
 
 Each tool carries a `promptSnippet`/`promptGuidelines`, so the model discovers the canvas workflow from the system prompt without loading the skill.
+
+## Design system
+
+The canvas owns all visual design so agents never have to: bare semantic HTML (headings, tables, buttons, inputs, labels) is styled by `static/styles.css` — warm paper/ink theme with light+dark support, Fraunces/Karla/IBM Plex Mono typography pinned from jsdelivr, app-shell grid with a sticky sidebar, and subtle patch-arrival motion.
+
+Agents add layout intent only through a closed helper-class vocabulary: `card`, `callout`, `warning`, `success`, `danger`, `info`, `grid`, `stack`, `row`, `toolbar`, `field`, `muted`, `badge`, `btn-primary`, `btn-quiet`. Unknown classes and other design mistakes come back as `warnings` in the `canvas_render` result (see `src/lint.ts`): stripped inline styles, prose outside `<markdown-block>`, controls without `data-signal`, buttons without `data-event`, overlong `#status` lines, repeated appends to `#root`.
+
+Checkpoint buttons (`data-event="checkpoint:..."`) automatically render as the filled primary action; attention buttons as accent outlines.
 
 ## Selectors and render modes
 
@@ -74,6 +82,13 @@ Render modes:
 - Quiet signal sync (`data-signal` inputs) never messages the transcript.
 - `data-event="attention:<name>"` buttons post a concise transcript summary; steers the agent mid-turn when it is streaming.
 - `data-event="checkpoint:<name>"` buttons resolve a pending `canvas_wait_for_event`; when none is pending, the checkpoint arrives as a chat message instead (never both).
+
+## Reactive attributes
+
+Declarative client-side reactivity bound to the signal store — a bare signal key only (optional `!` negation), never expressions, so agent HTML cannot execute logic:
+
+- `data-show="<signal key>"` — element visible while the signal is non-empty
+- `data-enable-when="<signal key>"` — control disabled until the signal is non-empty
 
 ## Security
 
