@@ -20,6 +20,8 @@ Canvas is a temporary sidecar work surface next to chat, not a canonical source 
 
 **The canvas owns the design.** Semantic HTML is styled automatically — headings, paragraphs, tables, buttons, inputs, labels all look designed with zero classes. Your job is structure and content, not styling. Start from a recipe below; do not invent layouts or class names.
 
+Canvas visual language is intentionally fixed: simple black-and-white, shadcn-like surfaces with restrained borders and radius. Never improvise a palette or use semantic status colors as decoration; color belongs only to success, warning, danger, and info meaning.
+
 ## Tool reference
 
 - `canvas_render({ selector, html, mode })`
@@ -59,6 +61,8 @@ These are rules, not suggestions:
 5. Every input control carries `data-signal`; every button carries `data-event`. A control without them is dead UI.
 6. Use only the documented helper classes. Unknown classes have no styles and trigger a lint warning.
 7. One idea per screen: if a section needs scrolling past ~two viewports, split it into slots or move detail into `<details>`.
+8. Cards communicate bounded hierarchy, not default section chrome. Prefer plain sections, headings, rules, and whitespace; use `.card` for genuinely raised units.
+9. Keep button labels concise (roughly three words), preserve consecutive heading levels, and give long documents named section slots.
 
 ## Event model
 
@@ -127,7 +131,7 @@ Global feedback + checkpoint (the standard control cluster — reuse this shape 
 Section feedback:
 
 ```html
-<section class="card" id="canvas-scope" data-canvas-slot="scope">
+<section id="canvas-scope" data-canvas-slot="scope">
   <h3>Scope</h3>
   <markdown-block>**In**: auth flow, token refresh. **Out**: SSO federation.</markdown-block>
   <label class="field">
@@ -200,12 +204,12 @@ Spec review — draft 1 of RFC: auth refresh
   <h1>Auth token refresh</h1>
   <p class="muted">Draft 1 — comment per section in the sidebar, approve when ready.</p>
 
-  <section class="card" id="canvas-goals" data-canvas-slot="goals">
+  <section id="canvas-goals" data-canvas-slot="goals">
     <h2>Goals <span class="badge">stable</span></h2>
     <markdown-block>...</markdown-block>
   </section>
 
-  <section class="card" id="canvas-design" data-canvas-slot="design">
+  <section id="canvas-design" data-canvas-slot="design">
     <h2>Design <span class="badge warning">draft</span></h2>
     <markdown-block>...</markdown-block>
     <mermaid-diagram>sequenceDiagram
@@ -270,7 +274,7 @@ Then `canvas_wait_for_event({ name: "pick_backend" })` — the resolved event in
 ```html
 <section id="canvas-walkthrough" data-canvas-slot="walkthrough">
   <h1>Change walkthrough</h1>
-  <section class="card" id="canvas-hunk-1" data-canvas-slot="hunk-1">
+  <section id="canvas-hunk-1" data-canvas-slot="hunk-1">
     <h3>1 — retry on 401 <span class="badge">src/auth.ts</span></h3>
     <code-block language="diff">@@ -12,3 +12,6 @@
 -const res = await fetch(url);
@@ -315,17 +319,18 @@ Then `canvas_wait_for_event({ name: "pick_backend" })` — the resolved event in
 - dumping long markdown in chat while canvas open
 - hand-writing HTML prose or tables instead of `<markdown-block>`
 - inventing class names or layouts instead of using a recipe
+- wrapping every section in a card instead of reserving elevation for bounded hierarchy
 - replacing a parent node that contains active input
 - repeatedly appending to `#root` instead of patching named slots
 - putting documents or code in `#sidebar`
 - posting raw full JSON summaries to transcript
-- surprise opening browser without `/canvas`
+- surprise opening browser without `/canvas on` or `/canvas open`
 - treating canvas DOM as persistent state
 - ignoring `warnings` returned by `canvas_render`
 
 ## Worked example
 
-1. User runs `/canvas`.
+1. User runs `/canvas on` (or `/canvas open` to force opening another browser tab).
 2. Agent renders the spec-review recipe: status line, `#root` scaffold with section slots, controls in `#sidebar`.
 3. User types section feedback (`feedback.section.design`).
 4. User clicks revise button (`attention:revise_spec`).

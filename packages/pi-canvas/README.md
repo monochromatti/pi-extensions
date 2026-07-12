@@ -16,11 +16,11 @@ npm run test --workspace packages/pi-canvas
 
 ## Use
 
-Primary entrypoint: `/canvas`.
+Primary entrypoint: `/canvas on`.
 
 Quick showcase entrypoint: `/canvas-demo`.
 
-`/canvas` behavior:
+`/canvas on` behavior:
 
 - starts local server (`127.0.0.1`) if needed
 - prints Canvas URL in CLI
@@ -28,11 +28,11 @@ Quick showcase entrypoint: `/canvas-demo`.
 - reuses existing session canvas on later calls
 - prints fallback workflow guidance (prompt injection caveat)
 
-`/canvas stop` stops the server; the next `/canvas` restarts it and reopens the browser.
+`/canvas open` explicitly opens the browser again, starting and enabling canvas if needed. `/canvas off` disables canvas tools and stops the server. `/canvas status` reports enabled/running state. `/canvas stop` remains an alias for `off`. Bare `/canvas` prints usage and changes no state.
 
 `/canvas-demo` behavior:
 
-- does everything `/canvas` does
+- does everything `/canvas open` does
 - renders a starter showcase into `#status`, `#root`, and `#sidebar`
 - includes markdown, Mermaid, diff code block, and interactive feedback controls
 
@@ -48,9 +48,11 @@ Each tool carries a `promptSnippet`/`promptGuidelines`, so the model discovers t
 
 ## Design system
 
-The canvas owns all visual design so agents never have to: bare semantic HTML (headings, tables, buttons, inputs, labels) is styled by `static/styles.css` — warm paper/ink theme with light+dark support, Fraunces/Karla/IBM Plex Mono typography pinned from jsdelivr, app-shell grid with a sticky sidebar, and subtle patch-arrival motion.
+The canvas owns all visual design so agents never have to: bare semantic HTML (headings, tables, buttons, inputs, labels) is styled by `static/styles.css` — fixed black-and-white, shadcn-like light+dark surfaces, system-sans typography, IBM Plex Mono for code and labels, an app-shell grid with a sticky sidebar, and subtle patch-arrival motion. Decorative palettes are intentionally unavailable; color is reserved for semantic status.
 
 Agents add layout intent only through a closed helper-class vocabulary: `card`, `callout`, `warning`, `success`, `danger`, `info`, `grid`, `stack`, `row`, `toolbar`, `field`, `muted`, `badge`, `btn-primary`, `btn-quiet`. Unknown classes and other design mistakes come back as `warnings` in the `canvas_render` result (see `src/lint.ts`): stripped inline styles, prose outside `<markdown-block>`, controls without `data-signal`, buttons without `data-event`, overlong `#status` lines, repeated appends to `#root`.
+
+The linter also catches repetitive card chrome, long action labels, skipped heading levels, and large root documents without named patch slots. Cards are reserved for bounded hierarchy; plain document sections are the default.
 
 Checkpoint buttons (`data-event="checkpoint:..."`) automatically render as the filled primary action; attention buttons as accent outlines.
 
@@ -127,7 +129,7 @@ Coverage currently includes session/events, server routes (including SSE), rende
 High-level acceptance flow:
 
 1. install and enable `@monochromatti/pi-canvas`
-2. run `/canvas`
+2. run `/canvas on`
 3. browser opens and CLI prints Canvas URL
 4. empty-state appears in `#root`
 5. ask agent for spec planning help
@@ -171,10 +173,10 @@ Diff snippet:
 </code-block>
 ```
 
-## `/canvas` guidance caveat (6.10)
+## `/canvas on` guidance caveat (6.10)
 
 Prompt injection API may be unavailable in host Pi runtime.
-When unavailable, `/canvas` falls back to explicit guidance line after URL (`canvas_render`, `canvas_read_signals`, `canvas_wait_for_event`).
+When unavailable, `/canvas on` falls back to explicit guidance line after URL (`canvas_render`, `canvas_read_signals`, `canvas_wait_for_event`).
 
 ## Render transport
 
