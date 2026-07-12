@@ -37,6 +37,7 @@ type CanvasCommandContext = {
 type CanvasCommandResult =
 	| { ok: true; url: string; reused: boolean }
 	| { ok: true; stopped: true }
+	| { ok: true; enabled: boolean; running: boolean; url?: string }
 	| { ok: false; error: string };
 
 type CanvasMessageOptions = { deliverAs?: "steer" | "followUp" };
@@ -47,6 +48,7 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 	const openBrowser = deps.openBrowser ?? openInBrowser;
 	let runtime: CanvasServerRuntime | undefined;
 	let openedBrowser = false;
+	let canvasEnabled = false;
 
 	// Track streaming state so canvas events know whether to steer the agent
 	// mid-turn or trigger a fresh turn. deps.isAgentActive overrides for tests.
@@ -63,7 +65,7 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 		name: "canvas_render",
 		label: "Canvas render",
 		description:
-			"Render content into the local collaboration canvas the user opens with /canvas. " +
+			"Render content into the local collaboration canvas after the user enables it with /canvas on. " +
 			"Targets a slot selector (#root, #status, #sidebar, #canvas-* ids, or [data-canvas-slot=\"name\"]); " +
 			"modes: inner (default), outer, append, prepend. HTML is sanitized (no scripts/styles/handlers). " +
 			"Semantic HTML is styled automatically; the only classes with styles are: card, callout, warning, success, danger, info, grid, stack, row, toolbar, field, muted, badge, btn-primary, btn-quiet. " +
@@ -71,7 +73,7 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 			"Collect user input with data-signal attributes and buttons like data-event=\"attention:name\" or data-event=\"checkpoint:name\"; " +
 			"data-show=\"<signal key>\" and data-enable-when=\"<signal key>\" toggle visibility/enablement from signals. " +
 			"The result lists declared slots and may include design-lint warnings: fix them in your next render.",
-		promptSnippet: "canvas_render(selector, html, mode) - render UI into the local canvas the user opens with /canvas",
+		promptSnippet: "canvas_render(selector, html, mode) - render UI into canvas after /canvas on",
 		promptGuidelines: [
 			"Canvas: patch the smallest slot that changed; never replace an element containing input the user may be typing into.",
 			"Canvas: prefer <markdown-block> for prose over hand-written HTML; summarize important canvas feedback into chat before final output.",
@@ -87,6 +89,7 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 			required: ["selector", "html"],
 		},
 		async execute(_toolCallId, params?: RenderParams) {
+			if (!canvasEnabled) return disabledToolResult();
 			if (!params?.selector || typeof params.html !== "string") {
 				return {
 					content: [{ type: "text", text: JSON.stringify({ ok: false, error: "selector and html required" }) }],
@@ -143,6 +146,7 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 			},
 		},
 		async execute(_toolCallId, params?: WaitForEventParams, signal?: AbortSignal) {
+			if (!canvasEnabled) return disabledToolResult();
 			const result = await waitForEvent(session, {
 				name: params?.name,
 				timeoutMs: params?.timeoutMs,
@@ -156,18 +160,23 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 	});
 
 	pi.registerCommand("canvas", {
-		description: "Open the local collaboration canvas ('/canvas stop' stops it)",
+		description: "Control canvas: /canvas on|open|off|status",
 		handler: async (args: unknown, ctx: CanvasCommandContext) => {
 			const argument = typeof args === "string" ? args.trim().toLowerCase() : "";
-			if (argument === "stop") return stopCanvasRuntime(ctx);
-			return ensureCanvasRuntime(ctx);
+			if (argument === "on") return ensureCanvasRuntime(ctx);
+			if (argument === "open") return ensureCanvasRuntime(ctx, true);
+			if (argument === "off" || argument === "stop") return stopCanvasRuntime(ctx);
+			if (argument === "status") return reportCanvasStatus(ctx);
+			const error = "Usage: /canvas on | open | off | status";
+			reportCanvasWarning(ctx, error);
+			return { ok: false, error };
 		},
 	});
 
 	pi.registerCommand("canvas-demo", {
 		description: "Open canvas and render an interactive showcase",
 		handler: async (_args: unknown, ctx: CanvasCommandContext) => {
-			const ready = await ensureCanvasRuntime(ctx);
+			const ready = await ensureCanvasRuntime(ctx, true);
 			if (!ready.ok) return ready;
 
 			renderCanvasDemo(session);
@@ -180,7 +189,8 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 		},
 	});
 
-	async function ensureCanvasRuntime(ctx: CanvasCommandContext): Promise<CanvasCommandResult> {
+	async function ensureCanvasRuntime(ctx: CanvasCommandContext, forceOpen = false): Promise<CanvasCommandResult> {
+		canvasEnabled = true;
 		const hadRuntime = Boolean(runtime);
 		if (!runtime) {
 			try {
@@ -200,6 +210,7 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 					formatCheckpointSummary,
 				});
 			} catch (error) {
+				canvasEnabled = false;
 				const message = `Canvas failed to start: ${errorMessage(error)}`;
 				reportCanvasError(ctx, message);
 				return { ok: false, error: errorMessage(error) };
@@ -210,7 +221,7 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 		reportCanvasInfo(ctx, `Canvas URL: ${url}`);
 		reportCanvasInfo(ctx, canvasGuidanceText());
 
-		if (!openedBrowser) {
+		if (forceOpen || !openedBrowser) {
 			try {
 				await openBrowser(url);
 				openedBrowser = true;
@@ -226,8 +237,9 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 	}
 
 	async function stopCanvasRuntime(ctx: CanvasCommandContext): Promise<CanvasCommandResult> {
+		canvasEnabled = false;
 		if (!runtime) {
-			reportCanvasInfo(ctx, "Canvas is not running.");
+			reportCanvasInfo(ctx, "Canvas is off.");
 			return { ok: true, stopped: true };
 		}
 
@@ -241,8 +253,14 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 
 		runtime = undefined;
 		openedBrowser = false;
-		reportCanvasInfo(ctx, "Canvas stopped.");
+		reportCanvasInfo(ctx, "Canvas is off.");
 		return { ok: true, stopped: true };
+	}
+
+	function reportCanvasStatus(ctx: CanvasCommandContext): CanvasCommandResult {
+		const result = { ok: true as const, enabled: canvasEnabled, running: Boolean(runtime), url: runtime?.url };
+		reportCanvasInfo(ctx, canvasEnabled ? `Canvas is on${runtime ? `: ${runtime.url}` : "."}` : "Canvas is off.");
+		return result;
 	}
 
 	pi.on("session_shutdown", async () => {
@@ -251,6 +269,11 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 		runtime = undefined;
 		openedBrowser = false;
 	});
+}
+
+function disabledToolResult() {
+	const details = { ok: false, error: "Canvas is off. Run /canvas on." };
+	return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 }
 
 // The demo doubles as the pattern library: every component, helper class,

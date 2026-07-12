@@ -95,7 +95,8 @@ test("2.4 read_signals tool reads in-memory session state without steering", asy
 
 test("2.6 wait_for_event tool wired to event runtime and returns timeout payload", async () => {
 	const fake = createFakePi();
-	registerCanvasExtension(fake.pi);
+	registerCanvasExtension(fake.pi, { openBrowser: async () => {} });
+	await fake.getCommand("canvas")?.handler?.("on", { ui: {} });
 
 	const waitTool = fake.tools.find((tool) => tool.name === "canvas_wait_for_event");
 	assert.ok(waitTool?.execute);
@@ -103,11 +104,13 @@ test("2.6 wait_for_event tool wired to event runtime and returns timeout payload
 	const result = await waitTool.execute?.("id", { name: "approve", timeoutMs: 5 });
 	assert.deepEqual((result as { details?: unknown }).details, { timeout: true });
 	assert.equal(fake.getSendUserMessageCalls(), 0);
+	await fake.emit("session_shutdown", {}, {});
 });
 
 test("4.4 render tool wired to render runtime and returns queued patch payload", async () => {
 	const fake = createFakePi();
-	registerCanvasExtension(fake.pi);
+	registerCanvasExtension(fake.pi, { openBrowser: async () => {} });
+	await fake.getCommand("canvas")?.handler?.("on", { ui: {} });
 
 	const renderTool = fake.tools.find((tool) => tool.name === "canvas_render");
 	assert.ok(renderTool?.execute);
@@ -125,6 +128,7 @@ test("4.4 render tool wired to render runtime and returns queued patch payload",
 		[{ selector: "#status", mode: "append", html: "<p>hello</p>" }],
 	);
 	assert.equal(fake.getSendUserMessageCalls(), 0);
+	await fake.emit("session_shutdown", {}, {});
 });
 
 test("6.1/6.2 /canvas starts server if needed, prints URL, opens browser first time only", async () => {
@@ -153,7 +157,7 @@ test("6.1/6.2 /canvas starts server if needed, prints URL, opens browser first t
 	const canvas = fake.getCommand("canvas");
 	assert.ok(canvas?.handler);
 
-	const result = await canvas.handler?.([], {
+	const result = await canvas.handler?.("on", {
 		ui: {
 			notify(message: string, level?: string) {
 				events.push({ message, level });
@@ -204,10 +208,10 @@ test("6.3/6.4 second /canvas call reuses same server url and does not reopen bro
 	const canvas = fake.getCommand("canvas");
 	assert.ok(canvas?.handler);
 
-	const first = await canvas.handler?.([], {
+	const first = await canvas.handler?.("on", {
 		ui: { writeLine(line: string) { messages.push(line); } },
 	});
-	const second = await canvas.handler?.([], {
+	const second = await canvas.handler?.("on", {
 		ui: { writeLine(line: string) { messages.push(line); } },
 	});
 
@@ -257,14 +261,14 @@ test("6.11 browser-open failure warns and allows retry on later /canvas", async 
 	const canvas = fake.getCommand("canvas");
 	assert.ok(canvas?.handler);
 
-	const first = await canvas.handler?.([], {
+	const first = await canvas.handler?.("on", {
 		ui: {
 			notify(message: string, level?: string) {
 				notices.push({ message, level });
 			},
 		},
 	});
-	const second = await canvas.handler?.([], {
+	const second = await canvas.handler?.("on", {
 		ui: {
 			notify(message: string, level?: string) {
 				notices.push({ message, level });
@@ -302,7 +306,7 @@ test("6.9/6.10 /canvas prints workflow guidance after url as fallback prompt inj
 	const canvas = fake.getCommand("canvas");
 	assert.ok(canvas?.handler);
 
-	await canvas.handler?.([], {
+	await canvas.handler?.("on", {
 		ui: { writeLine(line: string) { messages.push(line); } },
 	});
 
@@ -327,7 +331,7 @@ test("6.11 startServer failure returns {ok:false,error} and reports UI error wit
 	const canvas = fake.getCommand("canvas");
 	assert.ok(canvas?.handler);
 
-	const result = await canvas.handler?.([], {
+	const result = await canvas.handler?.("on", {
 		ui: {
 			notify(message: string, level?: string) {
 				notices.push({ message, level });
@@ -366,14 +370,14 @@ test("6.5/6.6 session_shutdown stops server and resets canvas lifecycle", async 
 	const canvas = fake.getCommand("canvas");
 	assert.ok(canvas?.handler);
 
-	await canvas.handler?.([], { ui: {} });
+	await canvas.handler?.("on", { ui: {} });
 	assert.equal(startServerCalls, 1);
 	assert.equal(stopCalls, 0);
 
 	await fake.emit("session_shutdown", {}, {});
 	assert.equal(stopCalls, 1);
 
-	await canvas.handler?.([], { ui: {} });
+	await canvas.handler?.("on", { ui: {} });
 	assert.equal(startServerCalls, 2);
 	assert.equal(openBrowserCalls, 2);
 });
@@ -398,7 +402,7 @@ test("6.7/6.8 explicit attention + checkpoint send concise transcript messages; 
 
 	const canvas = fake.getCommand("canvas");
 	assert.ok(canvas?.handler);
-	await canvas.handler?.([], { ui: {} });
+	await canvas.handler?.("on", { ui: {} });
 
 	assert.ok(capturedOptions?.attentionPolicy);
 	assert.equal(fake.getSendUserMessageCalls(), 0);
@@ -438,7 +442,7 @@ test("8.5/8.6 /canvas smoke: command starts live server, serves shell, then rest
 	const canvas = fake.getCommand("canvas");
 	assert.ok(canvas?.handler);
 
-	const first = (await canvas.handler?.([], {
+	const first = (await canvas.handler?.("on", {
 		ui: { writeLine(line: string) { lines.push(line); } },
 	})) as { ok: boolean; url?: string; reused?: boolean };
 	assert.equal(first.ok, true);
@@ -459,7 +463,7 @@ test("8.5/8.6 /canvas smoke: command starts live server, serves shell, then rest
 
 	await fake.emit("session_shutdown", {}, {});
 
-	const second = (await canvas.handler?.([], {
+	const second = (await canvas.handler?.("on", {
 		ui: { writeLine(line: string) { lines.push(line); } },
 	})) as { ok: boolean; url?: string; reused?: boolean };
 	assert.equal(second.ok, true);
@@ -507,22 +511,78 @@ test("6.12 /canvas stop stops the server, resets browser open, and restart reope
 		},
 	};
 
-	await canvas.handler?.("", ctx);
+	await canvas.handler?.("on", ctx);
 	assert.equal(startServerCalls, 1);
 
 	const stopped = await canvas.handler?.("stop", ctx);
 	assert.deepEqual(stopped, { ok: true, stopped: true });
 	assert.equal(stopCalls, 1);
-	assert.ok(notices.some((entry) => entry.message === "Canvas stopped."));
+	assert.ok(notices.some((entry) => entry.message === "Canvas is off."));
 
 	// Stopping when idle is a no-op, not an error.
 	const stoppedAgain = await canvas.handler?.("STOP", ctx);
 	assert.deepEqual(stoppedAgain, { ok: true, stopped: true });
 	assert.equal(stopCalls, 1);
 
-	const restarted = (await canvas.handler?.("", ctx)) as { ok: boolean; reused?: boolean };
+	const restarted = (await canvas.handler?.("on", ctx)) as { ok: boolean; reused?: boolean };
 	assert.equal(restarted.ok, true);
 	assert.equal(restarted.reused, false);
 	assert.equal(startServerCalls, 2);
 	assert.equal(openBrowserCalls, 2);
+});
+
+test("6.13 canvas requires explicit activation and off gates mutating/wait tools", async () => {
+	const fake = createFakePi();
+	let starts = 0;
+	registerCanvasExtension(fake.pi, {
+		async startServer() {
+			starts += 1;
+			return {
+				host: "127.0.0.1", port: 49999, baseUrl: "http://127.0.0.1:49999",
+				url: "http://127.0.0.1:49999/?token=explicit", stop: async () => {},
+			};
+		},
+		openBrowser: async () => {},
+	});
+	const canvas = fake.getCommand("canvas")!;
+	const render = fake.tools.find((tool) => tool.name === "canvas_render")!;
+	const wait = fake.tools.find((tool) => tool.name === "canvas_wait_for_event")!;
+
+	assert.deepEqual(await canvas.handler?.("", { ui: {} }), {
+		ok: false, error: "Usage: /canvas on | open | off | status",
+	});
+	assert.equal(starts, 0);
+	assert.equal((await render.execute?.("id", { selector: "#root", html: "x" }) as any).details.error, "Canvas is off. Run /canvas on.");
+	assert.equal((await wait.execute?.("id", { timeoutMs: 1 }) as any).details.error, "Canvas is off. Run /canvas on.");
+
+	await canvas.handler?.("on", { ui: {} });
+	assert.equal(starts, 1);
+	assert.equal((await render.execute?.("id", { selector: "#root", html: "x" }) as any).details.ok, true);
+	assert.deepEqual(await canvas.handler?.("status", { ui: {} }), {
+		ok: true, enabled: true, running: true, url: "http://127.0.0.1:49999/?token=explicit",
+	});
+
+	await canvas.handler?.("off", { ui: {} });
+	assert.equal((await render.execute?.("id", { selector: "#root", html: "x" }) as any).details.error, "Canvas is off. Run /canvas on.");
+	assert.deepEqual(await canvas.handler?.("status", { ui: {} }), { ok: true, enabled: false, running: false, url: undefined });
+});
+
+test("6.14 /canvas open explicitly opens an already-running canvas", async () => {
+	const fake = createFakePi();
+	let opens = 0;
+	registerCanvasExtension(fake.pi, {
+		async startServer() {
+			return {
+				host: "127.0.0.1", port: 49998, baseUrl: "http://127.0.0.1:49998",
+				url: "http://127.0.0.1:49998/?token=open", stop: async () => {},
+			};
+		},
+		openBrowser: async () => { opens += 1; },
+	});
+	const canvas = fake.getCommand("canvas")!;
+	await canvas.handler?.("on", { ui: {} });
+	await canvas.handler?.("on", { ui: {} });
+	await canvas.handler?.("open", { ui: {} });
+	assert.equal(opens, 2);
+	await canvas.handler?.("off", { ui: {} });
 });
