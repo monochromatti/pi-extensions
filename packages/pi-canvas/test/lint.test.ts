@@ -111,3 +111,27 @@ test("9.9 render result carries slots and append-streak warning surfaces via ren
 		assert.equal(reset.warnings, undefined);
 	}
 });
+
+test("9.10 taste preflight flags repetitive cards, long actions, and heading jumps", () => {
+	const warnings = lintCanvasHtml({
+		selector: "#root",
+		html: `<h1>Review</h1><h3>Details</h3>
+			<section class="card">one</section><section class="card">two</section>
+			<section class="card">three</section><section class="card">four</section>
+			<button data-event="checkpoint:continue">Approve this entire implementation and continue now</button>`,
+	});
+	assert.equal(warnings.some((warning) => /4 cards/.test(warning)), true);
+	assert.equal(warnings.some((warning) => /Long button label/.test(warning)), true);
+	assert.equal(warnings.some((warning) => /Heading hierarchy/.test(warning)), true);
+});
+
+test("9.11 large root documents without slots are flagged", () => {
+	const warnings = lintCanvasHtml({ selector: "#root", html: `<markdown-block>${"detail ".repeat(400)}</markdown-block>` });
+	assert.equal(warnings.some((warning) => /named data-canvas-slot/.test(warning)), true);
+	assert.equal(
+		lintCanvasHtml({ selector: "#root", html: `<section data-canvas-slot="detail">${"detail ".repeat(400)}</section>` }).some(
+			(warning) => /named data-canvas-slot/.test(warning),
+		),
+		false,
+	);
+});

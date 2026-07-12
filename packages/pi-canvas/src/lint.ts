@@ -63,6 +63,29 @@ export function lintCanvasHtml(context: LintContext): string[] {
 		warnings.push("Long prose is easier to author and better typeset inside <markdown-block> than as hand-written <p> tags.");
 	}
 
+	const cardCount = countMatches(markup, /\bclass\s*=\s*(?:"[^"]*\bcard\b[^"]*"|'[^']*\bcard\b[^']*')/gi);
+	if (cardCount >= 4) {
+		warnings.push(
+			`${cardCount} cards in one render creates repetitive container chrome. Use plain sections, headings, rules, or whitespace unless elevation communicates hierarchy.`,
+		);
+	}
+
+	const longButtons = collectLongButtonLabels(markup);
+	if (longButtons.length > 0) {
+		warnings.push(
+			`Long button label${longButtons.length > 1 ? "s" : ""} ${longButtons.map((label) => `"${label}"`).join(", ")} may wrap or obscure intent. Prefer concise action labels (roughly 3 words).`,
+		);
+	}
+
+	const headingJump = findHeadingLevelJump(markup);
+	if (headingJump) {
+		warnings.push(`Heading hierarchy jumps from <h${headingJump.from}> to <h${headingJump.to}>. Use consecutive levels so document structure remains accessible.`);
+	}
+
+	if (context.selector === "#root" && visibleTextLength(html) > 2000 && !/\bdata-canvas-slot\s*=/i.test(markup)) {
+		warnings.push("Large #root documents need named data-canvas-slot sections so revisions can patch one section without replacing the whole document.");
+	}
+
 	if (context.selector === "#status" && visibleTextLength(html) > 140) {
 		warnings.push("#status is a one-line strip; keep it to a short phrase and put content in #root.");
 	}
@@ -121,6 +144,25 @@ function collectUnboundControls(markup: string): string[] {
 		}
 	}
 	return [...unbound];
+}
+
+function collectLongButtonLabels(markup: string): string[] {
+	const labels: string[] = [];
+	for (const match of markup.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button\s*>/gi)) {
+		const text = (match[1] ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+		if (text.length > 32 || text.split(/\s+/).filter(Boolean).length > 5) labels.push(text.slice(0, 48));
+	}
+	return labels;
+}
+
+function findHeadingLevelJump(markup: string): { from: number; to: number } | undefined {
+	let previous: number | undefined;
+	for (const match of markup.matchAll(/<h([1-6])\b/gi)) {
+		const current = Number(match[1]);
+		if (previous !== undefined && current > previous + 1) return { from: previous, to: current };
+		previous = current;
+	}
+	return undefined;
 }
 
 function visibleTextLength(html: string): number {
