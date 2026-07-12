@@ -1,6 +1,8 @@
+import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { openInBrowser } from "./src/browser.ts";
 import { waitForEvent } from "./src/events.ts";
+import { exportCanvas } from "./src/export.ts";
 import { renderToCanvas } from "./src/render.ts";
 import { startCanvasServer, type CanvasServerOptions, type CanvasServerRuntime } from "./src/server.ts";
 import { createCanvasSession, type CanvasSessionState } from "./src/session.ts";
@@ -28,6 +30,7 @@ type CanvasCommandDeps = {
 };
 
 type CanvasCommandContext = {
+	cwd?: string;
 	ui?: {
 		notify?: (message: string, level?: "info" | "error") => void;
 		writeLine?: (line: string) => void;
@@ -38,6 +41,7 @@ type CanvasCommandResult =
 	| { ok: true; url: string; reused: boolean }
 	| { ok: true; stopped: true }
 	| { ok: true; enabled: boolean; running: boolean; url?: string }
+	| { ok: true; exported: true; path: string; patchCount: number }
 	| { ok: false; error: string };
 
 type CanvasMessageOptions = { deliverAs?: "steer" | "followUp" };
@@ -160,14 +164,22 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 	});
 
 	pi.registerCommand("canvas", {
-		description: "Control canvas: /canvas on|open|off|status",
+		description: "Control canvas: /canvas on|open|off|status|export [path]",
 		handler: async (args: unknown, ctx: CanvasCommandContext) => {
-			const argument = typeof args === "string" ? args.trim().toLowerCase() : "";
-			if (argument === "on") return ensureCanvasRuntime(ctx);
-			if (argument === "open") return ensureCanvasRuntime(ctx, true);
-			if (argument === "off" || argument === "stop") return stopCanvasRuntime(ctx);
-			if (argument === "status") return reportCanvasStatus(ctx);
-			const error = "Usage: /canvas on | open | off | status";
+			const { command, rest } = parseCanvasCommand(args);
+			if (command === "on") return ensureCanvasRuntime(ctx);
+			if (command === "open") return ensureCanvasRuntime(ctx, true);
+			if (command === "off" || command === "stop") return stopCanvasRuntime(ctx);
+			if (command === "status") return reportCanvasStatus(ctx);
+			if (command === "export") {
+				const parsedPath = parseCanvasExportPath(rest);
+				if (!parsedPath.ok) {
+					reportCanvasWarning(ctx, parsedPath.error);
+					return parsedPath;
+				}
+				return exportCanvasSnapshot(ctx, parsedPath.value);
+			}
+			const error = "Usage: /canvas on | open | off | status | export [path]";
 			reportCanvasWarning(ctx, error);
 			return { ok: false, error };
 		},
@@ -263,12 +275,81 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 		return result;
 	}
 
+	async function exportCanvasSnapshot(ctx: CanvasCommandContext, requestedPath: string): Promise<CanvasCommandResult> {
+		const baseDir = ctx.cwd ?? process.cwd();
+		const outputPath = requestedPath || defaultCanvasExportName();
+		try {
+			const result = await exportCanvas(session, {
+				outputPath: resolveCanvasExportPath(baseDir, outputPath),
+			});
+			reportCanvasInfo(ctx, `Canvas exported: ${result.path} (${result.patchCount} patches)`);
+			return { ok: true, exported: true, ...result };
+		} catch (error) {
+			const message = `Canvas export failed: ${errorMessage(error)}`;
+			reportCanvasError(ctx, message);
+			return { ok: false, error: errorMessage(error) };
+		}
+	}
+
 	pi.on("session_shutdown", async () => {
 		if (!runtime) return;
 		await runtime.stop();
 		runtime = undefined;
 		openedBrowser = false;
 	});
+}
+
+function parseCanvasCommand(args: unknown): { command: string; rest: string } {
+	if (typeof args !== "string") return { command: "", rest: "" };
+	const trimmed = args.trim();
+	if (!trimmed) return { command: "", rest: "" };
+	const separator = trimmed.search(/\s/);
+	if (separator < 0) return { command: trimmed.toLowerCase(), rest: "" };
+	return {
+		command: trimmed.slice(0, separator).toLowerCase(),
+		rest: trimmed.slice(separator).trim(),
+	};
+}
+
+function parseCanvasExportPath(value: string): { ok: true; value: string } | { ok: false; error: string } {
+	if (!value || (value[0] !== '"' && value[0] !== "'")) return { ok: true, value };
+	const quote = value[0];
+	let parsed = "";
+	for (let index = 1; index < value.length; index++) {
+		const character = value[index];
+		if (character === "\\" && index + 1 < value.length) {
+			const next = value[index + 1];
+			if (next === quote || next === "\\") {
+				parsed += next;
+				index += 1;
+				continue;
+			}
+		}
+		if (character !== quote) {
+			parsed += character;
+			continue;
+		}
+		if (value.slice(index + 1).trim()) {
+			return { ok: false, error: "Canvas export path has text after closing quote." };
+		}
+		return { ok: true, value: parsed };
+	}
+	return { ok: false, error: "Canvas export path has an unmatched quote." };
+}
+
+function resolveCanvasExportPath(baseDir: string, requestedPath: string): string {
+	const root = path.resolve(baseDir);
+	const outputPath = path.resolve(root, requestedPath);
+	const relative = path.relative(root, outputPath);
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+		throw new Error("Export path must stay within current working directory");
+	}
+	return outputPath;
+}
+
+function defaultCanvasExportName(now = new Date()): string {
+	const timestamp = now.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+	return `canvas-export-${timestamp}.html`;
 }
 
 function disabledToolResult() {

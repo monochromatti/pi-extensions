@@ -8,10 +8,13 @@
 		document.head.appendChild(link);
 	}
 
-	if (document.readyState === "complete") {
-		loadFontsStylesheet();
-	} else {
-		window.addEventListener("load", loadFontsStylesheet, { once: true });
+	// Static exports inline fonts.css and have no local asset server.
+	if (!document.documentElement.hasAttribute("data-canvas-export")) {
+		if (document.readyState === "complete") {
+			loadFontsStylesheet();
+		} else {
+			window.addEventListener("load", loadFontsStylesheet, { once: true });
+		}
 	}
 
 	function classifyDiffLine(line) {
@@ -97,7 +100,7 @@
 		}
 	}
 
-	const MERMAID_VERSION = "11.4.1";
+	const MERMAID_VERSION = "11.16.0";
 	const MERMAID_SRC = `https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js`;
 	let mermaidLoadPromise;
 	let mermaidInitialized = false;
@@ -107,6 +110,9 @@
 		const existing = globalThis.mermaid;
 		if (existing && typeof existing.render === "function") {
 			return Promise.resolve(existing);
+		}
+		if (document.documentElement.hasAttribute("data-canvas-export")) {
+			return Promise.resolve(null);
 		}
 
 		if (!mermaidLoadPromise) {
@@ -208,6 +214,9 @@
 		const existing = globalThis.marked;
 		if (existing && typeof existing.parse === "function") {
 			return Promise.resolve(existing);
+		}
+		if (document.documentElement.hasAttribute("data-canvas-export")) {
+			return Promise.resolve(null);
 		}
 
 		if (!markedLoadPromise) {

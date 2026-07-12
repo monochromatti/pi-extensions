@@ -327,6 +327,7 @@ Then `canvas_wait_for_event({ name: "pick_backend" })` — the resolved event in
 - surprise opening browser without `/canvas on` or `/canvas open`
 - treating canvas DOM as persistent state
 - ignoring `warnings` returned by `canvas_render`
+- exporting outside the current working directory: `/canvas export [path]` creates a fully offline file but rejects paths that escape the working directory
 
 ## Worked example
 

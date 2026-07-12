@@ -30,6 +30,8 @@ Quick showcase entrypoint: `/canvas-demo`.
 
 `/canvas open` explicitly opens the browser again, starting and enabling canvas if needed. `/canvas off` disables canvas tools and stops the server. `/canvas status` reports enabled/running state. `/canvas stop` remains an alias for `off`. Bare `/canvas` prints usage and changes no state.
 
+`/canvas export [path]` writes current canvas as a standalone static HTML file. Without a path it creates a timestamped `canvas-export-*.html` in the current working directory. Export works while the canvas server is stopped, preserves current signal values and local reactive controls, and disables attention/checkpoint buttons. It contains no session token, sync requests, polling, event backend, or runtime network dependency. Markdown and Mermaid runtimes are bundled into the exported file.
+
 `/canvas-demo` behavior:
 
 - does everything `/canvas open` does
@@ -91,6 +93,16 @@ Declarative client-side reactivity bound to the signal store — a bare signal k
 
 - `data-show="<signal key>"` — element visible while the signal is non-empty
 - `data-enable-when="<signal key>"` — control disabled until the signal is non-empty
+
+## Static export
+
+```text
+/canvas export
+/canvas export ./artifacts/review.html
+/canvas export "./artifacts/Canvas Review.html"
+```
+
+Export inlines the shell, design CSS, Markdown and Mermaid runtimes, component runtime, sanitized patch log, and current signal snapshot into one HTML file. Browser-side replay materializes the latest canvas state without running a server. Exported input controls retain local `data-show` and `data-enable-when` behavior; backend-dependent `data-event` controls are disabled. Output paths must remain inside the current working directory; quote paths containing spaces.
 
 ## Security
 

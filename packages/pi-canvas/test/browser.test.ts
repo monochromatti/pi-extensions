@@ -198,7 +198,7 @@ test("5.6 mermaid-diagram uses pinned jsdelivr mermaid loader and falls back saf
 	const loader = dom.window.document.querySelector("script[data-pi-canvas-mermaid='1']") as HTMLScriptElement | null;
 	assert.ok(loader);
 	assert.match(loader.src, /^https:\/\/cdn\.jsdelivr\.net\//);
-	assert.match(loader.src, /\/npm\/mermaid@11\.4\.1\/dist\/mermaid\.min\.js$/);
+	assert.match(loader.src, /\/npm\/mermaid@11\.16\.0\/dist\/mermaid\.min\.js$/);
 
 	await waitFor(() => Boolean(dom.window.document.querySelector("mermaid-diagram .mermaid-error")));
 	const error = dom.window.document.querySelector("mermaid-diagram .mermaid-error");

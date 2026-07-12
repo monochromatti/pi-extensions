@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import registerCanvasExtension from "../index.ts";
 import { pushAttentionEvent } from "../src/events.ts";
@@ -78,6 +81,78 @@ test("1.4 /canvas-demo opens canvas and queues showcase patches", async () => {
 		assert.equal(patchesBody.patches.some((patch) => patch.selector === "#sidebar" && /data-event="checkpoint:approve_demo"/.test(patch.html)), true);
 	} finally {
 		await fake.emit("session_shutdown", {}, {});
+	}
+});
+
+test("1.5 /canvas export writes current canvas while server is stopped", async () => {
+	const fake = createFakePi();
+	let browserOpens = 0;
+	registerCanvasExtension(fake.pi, { openBrowser: async () => { browserOpens += 1; } });
+	const temporary = await mkdtemp(path.join(os.tmpdir(), "pi-canvas-command-export-"));
+	try {
+		const canvas = fake.getCommand("canvas");
+		const render = fake.tools.find((tool) => tool.name === "canvas_render");
+
+		// Export remains available after canvas has been turned off. Render once
+		// through a temporary activation to populate the in-memory patch log.
+		await canvas?.handler?.("on", { ui: {} });
+		await render?.execute?.("id", { selector: "#root", html: "<h1>Command export</h1>" });
+		await canvas?.handler?.("off", { ui: {} });
+
+		const result = await canvas?.handler?.('export "Nested/Canvas Export.HTML"', { cwd: temporary, ui: {} }) as {
+			ok: boolean;
+			exported?: boolean;
+			path?: string;
+		};
+		assert.equal(result.ok, true);
+		assert.equal(result.exported, true);
+		assert.equal(result.path, path.join(temporary, "Nested", "Canvas Export.HTML"));
+		assert.match(await readFile(result.path!, "utf8"), /Command export/);
+		assert.equal(browserOpens, 1, "export must not reopen browser");
+	} finally {
+		await fake.emit("session_shutdown", {}, {});
+		await rm(temporary, { recursive: true, force: true });
+	}
+});
+
+test("1.6 /canvas export defaults inside cwd without starting server or browser", async () => {
+	const fake = createFakePi();
+	let serverStarts = 0;
+	let browserOpens = 0;
+	registerCanvasExtension(fake.pi, {
+		startServer: async () => {
+			serverStarts += 1;
+			throw new Error("must not start");
+		},
+		openBrowser: async () => { browserOpens += 1; },
+	});
+	const temporary = await mkdtemp(path.join(os.tmpdir(), "pi-canvas-default-export-"));
+	try {
+		const result = await fake.getCommand("canvas")?.handler?.("export", { cwd: temporary, ui: {} }) as {
+			ok: boolean;
+			path?: string;
+		};
+		assert.equal(result.ok, true);
+		assert.match(path.basename(result.path!), /^canvas-export-\d{8}-\d{6}\.html$/);
+		assert.equal(path.dirname(result.path!), temporary);
+		assert.equal(serverStarts, 0);
+		assert.equal(browserOpens, 0);
+	} finally {
+		await rm(temporary, { recursive: true, force: true });
+	}
+});
+
+test("1.7 /canvas export rejects malformed or escaping paths", async () => {
+	const fake = createFakePi();
+	registerCanvasExtension(fake.pi);
+	const temporary = await mkdtemp(path.join(os.tmpdir(), "pi-canvas-safe-export-"));
+	try {
+		const unmatched = await fake.getCommand("canvas")?.handler?.('export "unfinished', { cwd: temporary, ui: {} }) as any;
+		const escaping = await fake.getCommand("canvas")?.handler?.("export ../outside.html", { cwd: temporary, ui: {} }) as any;
+		assert.deepEqual(unmatched, { ok: false, error: "Canvas export path has an unmatched quote." });
+		assert.deepEqual(escaping, { ok: false, error: "Export path must stay within current working directory" });
+	} finally {
+		await rm(temporary, { recursive: true, force: true });
 	}
 });
 
@@ -292,6 +367,7 @@ test("6.9/6.10 /canvas prints workflow guidance after url as fallback prompt inj
 	const messages: string[] = [];
 
 	registerCanvasExtension(fake.pi, {
+		openBrowser: async () => {},
 		async startServer() {
 			return {
 				host: "127.0.0.1",
@@ -388,6 +464,7 @@ test("6.7/6.8 explicit attention + checkpoint send concise transcript messages; 
 
 	registerCanvasExtension(fake.pi, {
 		isAgentActive: () => true,
+		openBrowser: async () => {},
 		async startServer(_session, options) {
 			capturedOptions = options;
 			return {
@@ -549,7 +626,7 @@ test("6.13 canvas requires explicit activation and off gates mutating/wait tools
 	const wait = fake.tools.find((tool) => tool.name === "canvas_wait_for_event")!;
 
 	assert.deepEqual(await canvas.handler?.("", { ui: {} }), {
-		ok: false, error: "Usage: /canvas on | open | off | status",
+		ok: false, error: "Usage: /canvas on | open | off | status | export [path]",
 	});
 	assert.equal(starts, 0);
 	assert.equal((await render.execute?.("id", { selector: "#root", html: "x" }) as any).details.error, "Canvas is off. Run /canvas on.");
