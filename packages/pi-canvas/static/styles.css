@@ -6,10 +6,10 @@
  * add intent through the documented helper classes (see skills/canvas), and
  * the sanitizer strips <style>/style= — so everything lives here.
  *
- * Aesthetic: an engineer's proof sheet. Warm paper and ink, an editorial
- * serif for headings (Fraunces), a humanist sans for body (Karla), and a
- * grounded mono (IBM Plex Mono) for labels, status, and code. One petrol
- * accent; hairline rules; small, quiet motion when patches arrive.
+ * Aesthetic: restrained shadcn-like product UI. Neutral black/white surfaces,
+ * one system sans stack, grounded mono for labels and code, hairline rules,
+ * and small, quiet motion when patches arrive. Color is reserved for semantic
+ * success/warning/error states, never improvised decoration.
  */
 
 /* Webfonts live in fonts.css, injected after window load (see components.js)
@@ -18,28 +18,28 @@
 :root {
 	color-scheme: light dark;
 
-	--paper: light-dark(#f6f2ea, #1a1712);
-	--paper-raised: light-dark(#fdfbf6, #23201a);
-	--paper-sunken: light-dark(#efe9de, #15130f);
-	--ink: light-dark(#282318, #eae3d3);
+	--paper: light-dark(#ffffff, #09090b);
+	--paper-raised: light-dark(#ffffff, #18181b);
+	--paper-sunken: light-dark(#f4f4f5, #09090b);
+	--ink: light-dark(#09090b, #fafafa);
 	--ink-soft: color-mix(in oklab, var(--ink) 64%, var(--paper));
 	--line: color-mix(in oklab, var(--ink) 16%, var(--paper));
 	--line-strong: color-mix(in oklab, var(--ink) 30%, var(--paper));
 
-	--accent: light-dark(#0e6357, #56b3a2);
-	--on-accent: light-dark(#f6f2ea, #12211d);
+	--accent: light-dark(#18181b, #fafafa);
+	--on-accent: light-dark(#fafafa, #18181b);
 
 	--success: light-dark(#2e7a3f, #7cc98b);
 	--danger: light-dark(#a33a2c, #e08d7f);
 	--warning: light-dark(#a86a12, #ddab5f);
 	--info: light-dark(#2e5f8a, #85b4dc);
 
-	--font-body: "Karla Variable", "Karla", "Gill Sans", "Trebuchet MS", sans-serif;
-	--font-display: "Fraunces Variable", "Fraunces", Georgia, "Times New Roman", serif;
+	--font-body: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	--font-display: var(--font-body);
 	--font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-	--radius-sm: 0.4rem;
-	--radius: 0.7rem;
+	--radius-sm: 0.375rem;
+	--radius: 0.5rem;
 	--shadow: 0 1px 2px color-mix(in oklab, var(--ink) 8%, transparent),
 		0 6px 18px -12px color-mix(in oklab, var(--ink) 25%, transparent);
 }
@@ -68,9 +68,7 @@ body {
 	font-size: 1rem;
 	line-height: 1.55;
 	color: var(--ink);
-	background:
-		radial-gradient(70rem 36rem at 18% -8%, color-mix(in oklab, var(--accent) 7%, var(--paper)), transparent 70%),
-		var(--paper);
+	background: var(--paper);
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) minmax(15rem, 19rem);
 	grid-template-rows: auto 1fr;
@@ -285,6 +283,8 @@ kbd {
 
 table {
 	border-collapse: collapse;
+	display: block;
+	overflow-x: auto;
 	margin: 0.9em 0;
 	width: 100%;
 	font-size: 0.94rem;
@@ -353,6 +353,8 @@ button {
 	border-radius: var(--radius-sm);
 	background: var(--paper-raised);
 	cursor: pointer;
+	white-space: nowrap;
+	max-width: 100%;
 	transition: transform 120ms ease, border-color 120ms ease, background-color 120ms ease;
 }
 

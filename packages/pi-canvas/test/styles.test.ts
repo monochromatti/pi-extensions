@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { JSDOM } from "jsdom";
 
 import { CANVAS_HELPER_CLASSES } from "../src/lint.ts";
 
@@ -38,4 +39,16 @@ test("5.9 design substrate styles the shell, bare elements, and event-driven but
 	]) {
 		assert.equal(css.includes(needle), true, `styles.css should contain ${needle}`);
 	}
+});
+
+test("5.10 long actions and wide tables remain usable", () => {
+	const css = readFileSync(new URL("../static/styles.css", import.meta.url), "utf8");
+	const dom = new JSDOM(
+		`<!doctype html><style>${css}</style><button>Approve the complete implementation</button><table><tbody><tr><td>wide content</td></tr></tbody></table>`,
+		{ pretendToBeVisual: true },
+	);
+	const { document } = dom.window;
+
+	assert.equal(dom.window.getComputedStyle(document.querySelector("button")!).whiteSpace, "nowrap");
+	assert.equal(dom.window.getComputedStyle(document.querySelector("table")!).overflowX, "auto");
 });
