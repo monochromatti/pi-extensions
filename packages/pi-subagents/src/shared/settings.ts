@@ -19,6 +19,7 @@ export interface ResolvedStepBehavior {
 	skills: string[] | false;
 	model?: string;
 	thinking?: string;
+	requiredTools?: string[];
 }
 
 export interface StepOverrides {
@@ -29,6 +30,7 @@ export interface StepOverrides {
 	skills?: string[] | false;
 	model?: string;
 	thinking?: string;
+	requiredTools?: string[];
 }
 
 function normalizeOutputOverride(output: string | false | undefined): string | false | undefined {

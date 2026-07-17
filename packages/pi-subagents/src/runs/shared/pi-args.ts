@@ -17,6 +17,7 @@ export const SUBAGENT_SUPERVISOR_CWD_ENV = "PI_SUBAGENT_SUPERVISOR_CWD";
 export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 export const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 export const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
+export const SUBAGENT_SUPERVISOR_WAIT_MODE_ENV = "PI_SUBAGENT_SUPERVISOR_WAIT_MODE";
 
 export interface BuildPiArgsInput {
 	baseArgs: string[];
@@ -41,6 +42,7 @@ export interface BuildPiArgsInput {
 	runId?: string;
 	childAgentName?: string;
 	childIndex?: number;
+	supervisorWaitMode?: "foreground" | "async";
 }
 
 export interface BuildPiArgsResult {
@@ -160,6 +162,9 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	}
 	if (input.childIndex !== undefined) {
 		env[SUBAGENT_CHILD_INDEX_ENV] = String(input.childIndex);
+	}
+	if (input.supervisorWaitMode) {
+		env[SUBAGENT_SUPERVISOR_WAIT_MODE_ENV] = input.supervisorWaitMode;
 	}
 	if (input.mcpDirectTools?.length) {
 		env.MCP_DIRECT_TOOLS = input.mcpDirectTools.join(",");

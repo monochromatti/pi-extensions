@@ -43,6 +43,10 @@ const ContextOverride = Type.String({
 	description: "fresh starts a clean child; fork branches from parent context",
 });
 
+const RequiredToolsOverride = Type.Array(Type.String({ minLength: 1 }), {
+	description: "Tools child must have. Request is rejected before spawn when selected agent lacks one.",
+});
+
 const ControlOverrides = Type.Object({
 	enabled: Type.Optional(Type.Boolean({ description: "Enable child attention tracking for this run" })),
 	needsAttentionAfterMs: Type.Optional(Type.Integer({ minimum: 1, description: "Idle window before child needs attention" })),
@@ -69,6 +73,7 @@ const ParallelTaskSchema = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Model override for this task" })),
 	thinking: Type.Optional(Type.String({ description: "Thinking override for this task" })),
+	requiredTools: Type.Optional(RequiredToolsOverride),
 });
 
 const ChainParallelTaskSchema = Type.Object({
@@ -82,6 +87,7 @@ const ChainParallelTaskSchema = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Model override for this task" })),
 	thinking: Type.Optional(Type.String({ description: "Thinking override for this task" })),
+	requiredTools: Type.Optional(RequiredToolsOverride),
 });
 
 const ChainStepSchema = Type.Object({
@@ -94,6 +100,7 @@ const ChainStepSchema = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Model override for this step" })),
 	thinking: Type.Optional(Type.String({ description: "Thinking override for this step" })),
+	requiredTools: Type.Optional(RequiredToolsOverride),
 	parallel: Type.Optional(Type.Array(ChainParallelTaskSchema, { minItems: 1, description: "Tasks to run concurrently in this step" })),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Max concurrent tasks for this step" })),
 	failFast: Type.Optional(Type.Boolean({ description: "Stop this step on first task failure" })),
@@ -126,6 +133,7 @@ export const SubagentParams = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Model override for single mode" })),
 	thinking: Type.Optional(Type.String({ description: "Thinking override for single mode" })),
+	requiredTools: Type.Optional(RequiredToolsOverride),
 });
 
 export interface SubagentValidationResult {
@@ -247,7 +255,7 @@ export function validateSubagentParams(input: unknown): SubagentValidationResult
 		return { ok: false, error: "agent management actions are not supported" };
 	}
 	if (input.action !== undefined && !(SUBAGENT_CONTROL_ACTIONS as readonly string[]).includes(String(input.action))) {
-		return { ok: false, error: "action must be one of: status, interrupt, resume" };
+		return { ok: false, error: "action must be one of: status, interrupt, resume, collect" };
 	}
 
 	const modes = [

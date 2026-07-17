@@ -114,6 +114,7 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 		const logPath = path.join(asyncDir, `subagent-log-${effectiveRunId}.md`);
 		const eventsPath = path.join(asyncDir, "events.jsonl");
 		if (status) {
+			const isLive = status.state === "running" || status.state === "waiting_decision";
 			const outputPath = formatAsyncRunOutputPath({ asyncDir, outputFile: status.outputFile });
 			const progressLabel = formatAsyncRunProgressLabel({
 				mode: status.mode,
@@ -125,7 +126,7 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 			});
 			const started = new Date(status.startedAt).toISOString();
 			const updated = status.lastUpdate ? new Date(status.lastUpdate).toISOString() : "n/a";
-			const statusActivityText = status.state === "running" ? formatActivityLabel(status.lastActivityAt, status.activityState) : undefined;
+			const statusActivityText = isLive ? formatActivityLabel(status.lastActivityAt, status.activityState) : undefined;
 
 			const lines = [
 				`Run: ${status.runId}`,
@@ -141,21 +142,22 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				reconciliation.resultPath && fs.existsSync(reconciliation.resultPath) ? `Result: ${reconciliation.resultPath}` : undefined,
 			].filter((line): line is string => Boolean(line));
 			for (const [index, step] of (status.steps ?? []).entries()) {
-				const stepActivityText = step.status === "running" ? formatActivityLabel(step.lastActivityAt, step.activityState) : undefined;
+				const stepLive = step.status === "running" || step.status === "waiting_decision";
+				const stepActivityText = stepLive ? formatActivityLabel(step.lastActivityAt, step.activityState) : undefined;
 				const errorText = step.error ? `, error: ${step.error}` : "";
 				lines.push(`${stepLineLabel(status, index)}: ${step.agent} ${step.status}${stepActivityText ? `, ${stepActivityText}` : ""}${errorText}`);
 				const stepOutputPath = path.join(asyncDir, `output-${index}.log`);
 				if (stepOutputPath !== outputPath && fs.existsSync(stepOutputPath)) lines.push(`  Output: ${stepOutputPath}`);
-				if (step.status === "running") {
+				if (stepLive) {
 					lines.push(`  Planned intercom target: ${resolveSubagentIntercomTarget(status.runId, step.agent, index)} (registration/readiness not guaranteed)`);
 				}
 			}
-			if (status.state !== "running" && outputPath && fs.existsSync(outputPath)) {
+			if (!isLive && outputPath && fs.existsSync(outputPath)) {
 				const outputPreview = fs.readFileSync(outputPath, "utf-8").trim();
 				if (outputPreview) lines.push("", outputPreview);
 			}
 			if (status.sessionFile) lines.push(`Session: ${status.sessionFile}`);
-			if (status.state !== "running") {
+			if (!isLive) {
 				lines.push(formatResumeGuidance(status.runId, status.steps ?? [], status.sessionFile));
 			}
 			if (fs.existsSync(logPath)) lines.push(`Log: ${logPath}`);

@@ -46,6 +46,7 @@ export interface ChildRunSupervisor {
 	orchestratorIntercomTarget?: string;
 	orchestratorIntercomCwd?: string;
 	supervisorIntercomTarget?: SupervisorIntercomTarget;
+	supervisorWaitMode?: "foreground" | "async";
 }
 
 export interface ChildRunRequest {
@@ -104,6 +105,7 @@ export function prepareChildRun(
 		orchestratorIntercomTarget: request.supervisor?.orchestratorIntercomTarget,
 		orchestratorIntercomCwd: request.supervisor?.orchestratorIntercomCwd,
 		supervisorIntercomTarget: request.supervisor?.supervisorIntercomTarget,
+		supervisorWaitMode: request.supervisor?.supervisorWaitMode,
 		runId: request.identity.runId,
 		childAgentName: request.identity.agentName,
 		childIndex: request.identity.childIndex,

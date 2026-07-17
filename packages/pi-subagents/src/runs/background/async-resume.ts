@@ -194,7 +194,7 @@ export function resolveAsyncRunLocation(params: AsyncResumeParams, asyncDirRoot:
 }
 
 function resultState(result: AsyncResultFile): AsyncStatus["state"] {
-	if (result.state === "complete" || result.state === "failed" || result.state === "paused" || result.state === "running" || result.state === "queued") {
+	if (result.state === "complete" || result.state === "failed" || result.state === "paused" || result.state === "running" || result.state === "waiting_decision" || result.state === "queued") {
 		return result.state;
 	}
 	return result.success ? "complete" : "failed";
@@ -248,11 +248,11 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	if (requestedIndex !== undefined && !Number.isInteger(requestedIndex)) throw new Error(`Async run '${runId}' index must be an integer.`);
 	const terminalStepStatuses = new Set(["complete", "completed", "failed", "paused"]);
 
-	if (state === "running") {
+	if (state === "running" || state === "waiting_decision") {
 		if (requestedIndex !== undefined) {
 			if (requestedIndex < 0 || requestedIndex >= stepCount) throw new Error(`Async run '${runId}' has ${stepCount} children. Index ${requestedIndex} is out of range.`);
 			const selectedStep = statusSteps[requestedIndex];
-			if (selectedStep?.status === "running") {
+			if (selectedStep?.status === "running" || selectedStep?.status === "waiting_decision") {
 				return {
 					kind: "live",
 					runId,
@@ -270,7 +270,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		} else {
 			const running = statusSteps
 				.map((step, index) => ({ step, index }))
-				.filter(({ step }) => step.status === "running");
+				.filter(({ step }) => step.status === "running" || step.status === "waiting_decision");
 			const selected = running.length === 1 ? running[0] : undefined;
 			if (!selected) {
 				throw new Error(`Async run '${runId}' has ${running.length} running children. Provide index to choose one.`);

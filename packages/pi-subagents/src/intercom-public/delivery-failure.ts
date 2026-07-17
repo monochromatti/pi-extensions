@@ -9,9 +9,11 @@ export function formatDeliveryFailure(failure: DeliveryFailure): string {
     case "unsafe-machine-alias-target":
       return "Machine messages require exact target identity.";
     case "target-not-found":
-      return "Target session not found.";
+      return "Target session not found. It may have ended; completed subagent results arrive through subagent(), not Intercom.";
     case "expired-target":
-      return "Target session expired or disconnected.";
+      return "Target session expired or disconnected. It may have ended; completed subagent results arrive through subagent(), not Intercom.";
+	case "target-terminated":
+		return `Subagent ${failure.agent} (run ${failure.runId}, child ${failure.index + 1}) has terminated. Use subagent status or its result artifact.`;
     case "ambiguous-alias": {
       const candidates = failure.candidates
         .map((candidate) => `${candidate.intercomSessionId}(pi=${candidate.piSessionId},alias=${candidate.alias},namespace=${candidate.namespace},cwd=${candidate.cwd})`)

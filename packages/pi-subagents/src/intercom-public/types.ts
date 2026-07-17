@@ -104,6 +104,7 @@ export type DeliveryFailure =
   | { code: "unsafe-machine-alias-target" }
   | { code: "target-not-found" }
   | { code: "expired-target" }
+	| { code: "target-terminated"; runId: string; agent: string; index: number }
   | { code: "ambiguous-alias"; label: string; candidates: DeliveryFailureCandidate[] }
   | { code: "duplicate-pi-session"; piSessionId: string; candidates: DeliveryFailureCandidate[] };
 

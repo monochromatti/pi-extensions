@@ -83,7 +83,7 @@ export class ReplyTracker {
     }
 
     if (pending.length === 0) {
-      throw new Error("No active intercom context to reply to");
+      throw new Error("Cannot reply: no active incoming ask. Completed subagent results arrive through subagent(), not Intercom. Use subagent status or its result artifact.");
     }
 
     throw new Error(`Multiple pending asks — specify replyTo. Candidates: ${pending.map(contextLabel).join(", ")}`);

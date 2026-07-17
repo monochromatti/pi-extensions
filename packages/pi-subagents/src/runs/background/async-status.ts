@@ -33,7 +33,7 @@ export interface AsyncRunSummary {
 	id: string;
 	asyncDir: string;
 	sessionId?: string;
-	state: "queued" | "running" | "complete" | "failed" | "paused";
+	state: "queued" | "running" | "waiting_decision" | "complete" | "failed" | "paused";
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;
@@ -111,6 +111,12 @@ function deriveAsyncActivityState(asyncDir: string, status: AsyncStatus): { acti
 	};
 }
 
+function isBlockingSupervisorTool(status: AsyncStatus): boolean {
+	if (status.currentTool !== "contact_supervisor") return false;
+	const args = status.currentToolArgs ?? "";
+	return args.includes("need_decision") || args.includes("interview_request");
+}
+
 function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string }): AsyncRunSummary {
 	if (status.sessionId !== undefined && typeof status.sessionId !== "string") {
 		throw new Error(`Invalid async status '${path.join(asyncDir, "status.json")}': sessionId must be a string.`);
@@ -119,11 +125,14 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 	const steps = status.steps ?? [];
 	const chainStepCount = status.chainStepCount ?? steps.length;
 	const parallelGroups = normalizeParallelGroups(status.parallelGroups, steps.length, chainStepCount);
+	const state = status.state === "running" && isBlockingSupervisorTool(status)
+		? "waiting_decision" as const
+		: status.state;
 	return {
 		id: status.runId || path.basename(asyncDir),
 		asyncDir,
 		...(status.sessionId ? { sessionId: status.sessionId } : {}),
-		state: status.state,
+		state,
 		activityState,
 		lastActivityAt,
 		currentTool: status.currentTool,
@@ -173,7 +182,8 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 
 function sortRuns(runs: AsyncRunSummary[]): AsyncRunSummary[] {
 	const rank = (state: AsyncRunSummary["state"]): number => {
-		switch (state) {
+		 switch (state) {
+			case "waiting_decision": return 0;
 			case "running": return 0;
 			case "queued": return 1;
 			case "failed": return 2;

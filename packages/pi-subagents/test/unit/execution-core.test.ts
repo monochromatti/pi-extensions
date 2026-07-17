@@ -23,6 +23,7 @@ import {
   expandTopLevelTaskCounts,
   normalizeRepeatedParallelCounts,
 } from "../../src/runs/foreground/subagent-executor.ts";
+import { validateSubagentRunRequest } from "../../src/runs/foreground/subagent-request-normalizer.ts";
 import type { AgentConfig } from "../../src/agents/agents.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -37,30 +38,64 @@ function agent(name: string, defaultContext?: "fresh" | "fork"): AgentConfig {
   } as AgentConfig;
 }
 
-test("3.3/3.4 default context becomes fork when selected agent defaults to fork", () => {
+test("safe default context stays fresh even when selected agent advertises fork", () => {
   assert.equal(
     applyAgentDefaultContext({ agent: "worker", task: "x" }, [agent("worker", "fork")]).context,
-    "fork",
+    "fresh",
   );
   assert.equal(
     applyAgentDefaultContext({ tasks: [{ agent: "reviewer", task: "x" }] }, [agent("reviewer", "fork")]).context,
-    "fork",
+    "fresh",
   );
   assert.equal(
     applyAgentDefaultContext({ chain: [{ agent: "planner", task: "x" }] }, [agent("planner", "fork")]).context,
+    "fresh",
+  );
+});
+
+test("explicit fork context is preserved", () => {
+  assert.equal(
+    applyAgentDefaultContext({ agent: "worker", task: "x", context: "fork" }, [agent("worker", "fresh")]).context,
     "fork",
   );
 });
 
-test("3.3/3.4 explicit context is preserved over agent default context", () => {
-  assert.equal(
-    applyAgentDefaultContext({ agent: "worker", task: "x", context: "fresh" }, [agent("worker", "fork")]).context,
-    "fresh",
-  );
-  assert.equal(
-    applyAgentDefaultContext({ agent: "worker", task: "x" }, [agent("worker", "fresh")]).context,
-    undefined,
-  );
+test("required tools reject an incapable agent before spawn", () => {
+  const result = validateSubagentRunRequest({
+    shape: {
+      kind: "run-shape",
+      mode: "single",
+      effectiveAsync: false,
+      shareEnabled: false,
+      params: { agent: "researcher", task: "audit JSON", requiredTools: ["bash"] },
+      requestedCwd: "/repo",
+      effectiveCwd: "/repo",
+      context: "fresh",
+    },
+    executionAgents: [
+      { ...agent("researcher"), tools: ["read", "web_search"] },
+      { ...agent("worker"), tools: ["read", "bash"] },
+    ],
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.result.content[0]?.text ?? "", /researcher.*lacks required tool bash/i);
+});
+
+test("required tools allow capable agent", () => {
+  const result = validateSubagentRunRequest({
+    shape: {
+      kind: "run-shape",
+      mode: "single",
+      effectiveAsync: false,
+      shareEnabled: false,
+      params: { agent: "worker", task: "audit JSON", requiredTools: ["bash"] },
+      requestedCwd: "/repo",
+      effectiveCwd: "/repo",
+      context: "fresh",
+    },
+    executionAgents: [{ ...agent("worker"), tools: ["read", "bash"] }],
+  });
+  assert.equal(result.ok, true);
 });
 
 test("3.5/3.6 single output path resolves relative to requested cwd", () => {
@@ -95,6 +130,7 @@ test("3.7/3.8 + 4.5/4.6 child args include subagent metadata env and structured 
     runId: "run-123",
     childAgentName: "worker",
     childIndex: 2,
+    supervisorWaitMode: "foreground",
   });
   assert.ok(args.includes("Task: echo hi"));
   assert.deepEqual(args.slice(args.indexOf("--name"), args.indexOf("--name") + 2), ["--name", "child-session"]);
@@ -108,6 +144,7 @@ test("3.7/3.8 + 4.5/4.6 child args include subagent metadata env and structured 
   assert.equal(env[SUBAGENT_RUN_ID_ENV], "run-123");
   assert.equal(env[SUBAGENT_CHILD_AGENT_ENV], "worker");
   assert.equal(env[SUBAGENT_CHILD_INDEX_ENV], "2");
+  assert.equal(env.PI_SUBAGENT_SUPERVISOR_WAIT_MODE, "foreground");
   assert.equal(env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT, "1");
   assert.equal(env.PI_SUBAGENT_INHERIT_SKILLS, "0");
 });

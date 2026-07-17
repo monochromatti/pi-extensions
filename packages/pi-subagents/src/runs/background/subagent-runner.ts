@@ -913,7 +913,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	};
 	const syncTopLevelCurrentTool = (): void => {
 		const activeStep = statusPayload.steps
-			.filter((step) => step.status === "running" && typeof step.currentTool === "string" && step.currentTool.length > 0)
+			.filter((step) => (step.status === "running" || step.status === "waiting_decision") && typeof step.currentTool === "string" && step.currentTool.length > 0)
 			.sort((left, right) => (right.currentToolStartedAt ?? 0) - (left.currentToolStartedAt ?? 0))[0];
 		statusPayload.currentTool = activeStep?.currentTool;
 		statusPayload.currentToolStartedAt = activeStep?.currentToolStartedAt;
@@ -968,6 +968,11 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			step.currentToolArgs = extractToolArgsPreview(event.args ?? {});
 			step.currentToolStartedAt = now;
 			step.currentPath = currentPath;
+            const supervisorReason = typeof event.args?.reason === "string" ? event.args.reason : undefined;
+            if (event.toolName === "contact_supervisor" && (supervisorReason === "need_decision" || supervisorReason === "interview_request")) {
+                step.status = "waiting_decision";
+                statusPayload.state = "waiting_decision";
+            }
 			pendingToolResults[flatIndex] = { tool: event.toolName, path: currentPath, mutates, startedAt: now };
 			statusPayload.toolCount = (statusPayload.toolCount ?? 0) + 1;
 			syncTopLevelCurrentTool();
@@ -980,6 +985,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			step.currentToolArgs = undefined;
 			step.currentToolStartedAt = undefined;
 			step.currentPath = undefined;
+			if (step.status === "waiting_decision") {
+				step.status = "running";
+				if (!statusPayload.steps.some((candidate) => candidate.status === "waiting_decision")) statusPayload.state = "running";
+			}
 			syncTopLevelCurrentTool();
 		} else if (event.type === "tool_result_end" && event.message) {
 			const toolSnapshot = pendingToolResults[flatIndex];
@@ -1109,7 +1118,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	}
 
 	const interruptRunner = () => {
-		if (interrupted || statusPayload.state !== "running") return;
+		if (interrupted || (statusPayload.state !== "running" && statusPayload.state !== "waiting_decision")) return;
 		interrupted = true;
 		const now = Date.now();
 		statusPayload.state = "paused";
@@ -1117,7 +1126,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		statusPayload.activityState = undefined;
 		statusPayload.lastUpdate = now;
 		for (const step of statusPayload.steps) {
-			if (step.status === "running") {
+			if (step.status === "running" || step.status === "waiting_decision") {
 				step.status = "paused";
 				step.activityState = undefined;
 				step.endedAt = now;

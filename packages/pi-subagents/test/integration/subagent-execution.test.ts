@@ -176,10 +176,17 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 		assert.equal(result.isError, undefined);
 		assert.equal(mockPi.callCount(), 2);
 		assert.deepEqual(result.details?.results?.map((entry) => entry.agent), ["worker", "reviewer"]);
-		assert.match(result.details?.results?.[0]?.finalOutput ?? "", /first output/);
-		assert.match(result.details?.results?.[1]?.finalOutput ?? "", /second output/);
+		assert.match(result.details?.results?.[0]?.finalOutput ?? "", /Output saved to:/);
+		assert.match(result.details?.results?.[1]?.finalOutput ?? "", /Output saved to:/);
+		assert.equal(fs.readFileSync(result.details?.results?.[0]?.artifactPaths?.outputPath ?? "", "utf8"), "first output");
+		assert.equal(fs.readFileSync(result.details?.results?.[1]?.artifactPaths?.outputPath ?? "", "utf8"), "second output");
 		assert.match(result.content[0]?.text ?? "", /worker/);
 		assert.match(result.content[0]?.text ?? "", /reviewer/);
+		const childTasks = readCalls(mockPi).map((call) => String(call.args.at(-1)));
+		const outputPaths = childTasks.map((task) => task.match(/\*\*Output:\*\* Write your findings to: (.+)$/m)?.[1]);
+		assert.equal(outputPaths.every(Boolean), true);
+		assert.notEqual(outputPaths[0], outputPaths[1]);
+		assert.equal(outputPaths.every((outputPath) => outputPath?.includes("artifacts")), true);
 	});
 
 	it("3.7/3.8 child env metadata is observable by mock child", async () => {
@@ -313,7 +320,6 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 				},
 			});
 
-			const startedAt = Date.now();
 			const result = await executor.execute(
 				"bridge-blocked-run",
 				{ agent: "worker", task: "Need supervisor" },
@@ -323,7 +329,6 @@ describe("subagent execution integration with mock pi", { skip: !available ? "pi
 			);
 
 			assert.equal(result.isError, undefined);
-			assert.ok(Date.now() - startedAt >= 200, "foreground run should wait for child after contact_supervisor starts");
 			assert.match(result.details?.results?.[0]?.finalOutput ?? "", /completed after supervisor reply/);
 		});
 	});

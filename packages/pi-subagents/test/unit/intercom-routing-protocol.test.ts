@@ -9,7 +9,7 @@ import path from "node:path";
 import { IntercomClient } from "../../src/intercom-public/broker/client.ts";
 import { createMessageReader, writeMessage } from "../../src/intercom-public/broker/framing.ts";
 import { getBrokerSocketPath } from "../../src/intercom-public/broker/paths.ts";
-import { type DeliveredMessage, type SendTargetEnvelope } from "../../src/intercom-public/types.ts";
+import { type DeliveredMessage, type SendTargetEnvelope, type SessionSubagentMetadata } from "../../src/intercom-public/types.ts";
 
 const packageDir = process.cwd().endsWith(path.join("packages", "pi-subagents"))
   ? process.cwd()
@@ -87,6 +87,7 @@ async function connectClient(homeDir: string, session: {
   namespace?: string;
   cwd?: string;
   leaseTtlMs?: number;
+  subagent?: SessionSubagentMetadata;
 }): Promise<IntercomClient> {
   const previousHome = process.env.HOME;
   const previousUserProfile = process.env.USERPROFILE;
@@ -107,6 +108,7 @@ async function connectClient(homeDir: string, session: {
       leaseTtlMs: session.leaseTtlMs ?? 30_000,
       heartbeatIntervalMs: 10_000,
       status: "idle",
+      subagent: session.subagent,
     });
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
@@ -239,6 +241,47 @@ test("identity snapshot reconnect policy controls stale intercomSessionId re-res
     } finally {
       inbox.dispose();
       await disconnectAll([sender, target]);
+    }
+  });
+});
+
+test("subagent identity snapshot re-resolves live replacement before terminated diagnostic", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const sender = await connectClient(homeDir, { alias: "sender", piSessionId: "pi-sender", cwd: "/work/sender" });
+    const original = await connectClient(homeDir, {
+      alias: "worker",
+      piSessionId: "pi-child",
+      cwd: "/work/child-old",
+      subagent: { ownerPiSessionId: "pi-parent", runId: "run-1", agent: "worker", index: 0 },
+    });
+    const originalSessionId = original.sessionId;
+    assert.ok(originalSessionId);
+
+    await original.disconnect();
+
+    const replacement = await connectClient(homeDir, {
+      alias: "worker",
+      piSessionId: "pi-child",
+      cwd: "/work/child-new",
+      subagent: { ownerPiSessionId: "pi-parent", runId: "run-1", agent: "worker", index: 0 },
+    });
+    const inbox = createInbox(replacement);
+
+    try {
+      const fallback = await sender.sendManual({
+        kind: "identity-snapshot",
+        intercomSessionId: originalSessionId,
+        piSessionId: "pi-child",
+        alias: "worker",
+        reconnect: "same-pi-session-if-unique",
+      }, { text: "route-to-live-replacement" });
+
+      assert.equal(fallback.delivered, true);
+      const received = await waitForReceivedMessage(inbox.messages, "route-to-live-replacement");
+      assert.equal(received.content.text, "route-to-live-replacement");
+    } finally {
+      inbox.dispose();
+      await disconnectAll([sender, replacement]);
     }
   });
 });

@@ -26,6 +26,14 @@ function ask(id: string): DeliveredMessage {
   };
 }
 
+test("reply without an incoming ask directs subagent callers to result artifacts", () => {
+  const tracker = new ReplyTracker();
+  assert.throws(
+    () => tracker.resolveReplyTarget({}),
+    /Cannot reply: no active incoming ask\. Completed subagent results arrive through subagent\(\), not Intercom\./,
+  );
+});
+
 test("reply without replyTo fails when multiple pending asks exist and lists candidates", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(session("sender-a"), ask("ask-a"));

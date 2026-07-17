@@ -19,7 +19,9 @@ export function resolveSubagentResultStatus(input: {
 	state?: string;
 	interrupted?: boolean;
 	detached?: boolean;
+	terminalStatus?: SubagentResultStatus;
 }): SubagentResultStatus {
+	if (input.terminalStatus) return input.terminalStatus;
 	if (input.detached) return "detached";
 	if (input.interrupted || input.state === "paused") return "paused";
 	if (typeof input.success === "boolean") return input.success ? "completed" : "failed";
@@ -35,6 +37,8 @@ function countStatuses(children: SubagentResultIntercomChild[]): Record<Subagent
 		failed: 0,
 		paused: 0,
 		detached: 0,
+		blocked_capability: 0,
+		blocked_decision: 0,
 	};
 	for (const child of children) {
 		counts[child.status] += 1;
@@ -48,6 +52,8 @@ function formatStatusCounts(counts: Record<SubagentResultStatus, number>): strin
 		counts.failed ? `${counts.failed} failed` : undefined,
 		counts.paused ? `${counts.paused} paused` : undefined,
 		counts.detached ? `${counts.detached} detached` : undefined,
+		counts.blocked_capability ? `${counts.blocked_capability} blocked on capability` : undefined,
+		counts.blocked_decision ? `${counts.blocked_decision} blocked on decision` : undefined,
 	].filter((part): part is string => Boolean(part));
 	return parts.length ? parts.join(", ") : "0 results";
 }
@@ -55,6 +61,8 @@ function formatStatusCounts(counts: Record<SubagentResultStatus, number>): strin
 function resolveGroupedStatus(children: SubagentResultIntercomChild[]): SubagentResultStatus {
 	const counts = countStatuses(children);
 	if (counts.failed > 0) return "failed";
+	if (counts.blocked_capability > 0) return "blocked_capability";
+	if (counts.blocked_decision > 0) return "blocked_decision";
 	if (counts.paused > 0) return "paused";
 	if (counts.completed > 0) return "completed";
 	if (counts.detached > 0) return "detached";
