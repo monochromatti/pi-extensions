@@ -44,12 +44,16 @@ test("surface normalizer resolves cwd and control requests without agents", () =
 	const resume = normalizeSubagentSurfaceRequest({ rawParams: { action: "resume", id: "abc" }, runtimeCwd: "/repo" });
 	assert.equal(resume.ok, true);
 	assert.equal(resume.request.kind, "resume");
+
+	const collect = normalizeSubagentSurfaceRequest({ rawParams: { action: "collect", id: "abc" }, runtimeCwd: "/repo" });
+	assert.equal(collect.ok, true);
+	assert.equal(collect.request.kind, "collect");
 });
 
 test("surface normalizer preserves schema-driven unknown action error", () => {
 	const result = normalizeSubagentSurfaceRequest({ rawParams: { action: "bad" }, runtimeCwd: "/repo" });
 	assert.equal(result.ok, false);
-	assert.match(result.result.content[0]?.text ?? "", /action must be one of: status, interrupt, resume/);
+	assert.match(result.result.content[0]?.text ?? "", /action must be one of: status, interrupt, resume, collect/);
 });
 
 test("run shape expands top-level counts before default context", () => {
@@ -76,11 +80,11 @@ test("invalid count remains schema-driven before default context", () => {
 	assert.match(surface.result.content[0]?.text ?? "", /tasks\[0\] count must be an integer greater than or equal to 1/);
 });
 
-test("default context applies after run shape succeeds", () => {
+test("default context is fresh after run shape succeeds", () => {
 	const runShape = shape({ tasks: [{ agent: "worker", task: "a" }] });
 	const withContext = applyDefaultContextToRunShape(runShape, [agent("worker", "fork")]);
-	assert.equal(withContext.context, "fork");
-	assert.equal(withContext.params.context, "fork");
+	assert.equal(withContext.context, "fresh");
+	assert.equal(withContext.params.context, "fresh");
 });
 
 test("force top-level async is captured in run shape", () => {

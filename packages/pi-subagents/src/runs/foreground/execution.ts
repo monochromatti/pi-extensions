@@ -58,6 +58,13 @@ import {
 
 const artifactOutputByResult = new WeakMap<SingleResult, string>();
 
+function terminalStatusFromError(error: string | undefined): SingleResult["terminalStatus"] | undefined {
+	if (!error) return undefined;
+	if (error.includes("Supervisor decision unavailable in foreground subagent run") || error.includes("No reply from")) return "blocked_decision";
+	if (error.includes("lacks required tool") || error.includes("Routine execution cannot be delegated to supervisor")) return "blocked_capability";
+	return undefined;
+}
+
 function emptyUsage(): Usage {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 }
@@ -162,6 +169,7 @@ async function runSingleAttempt(
 			orchestratorIntercomTarget: options.orchestratorIntercomTarget,
 			orchestratorIntercomCwd: options.orchestratorIntercomCwd,
 			supervisorIntercomTarget: options.supervisorIntercomTarget,
+			supervisorWaitMode: options.supervisorWaitMode,
 		},
 	});
 
@@ -665,8 +673,9 @@ async function runSingleAttempt(
 	result.exitCode = classified.exitCode;
 	result.error = classified.error;
 	result.model = classified.model;
+	result.terminalStatus = terminalStatusFromError(result.error);
 
-	progress.status = result.exitCode === 0 ? "completed" : "failed";
+	progress.status = result.terminalStatus ?? (result.exitCode === 0 ? "completed" : "failed");
 	progress.durationMs = Date.now() - startTime;
 	if (result.error) {
 		progress.error = result.error;

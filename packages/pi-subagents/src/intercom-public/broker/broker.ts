@@ -31,6 +31,7 @@ class IntercomBroker {
   private piSessionIndex = new Map<string, Set<string>>();
   private scopedAliasIndex = new Map<string, Set<string>>();
   private globalAliasIndex = new Map<string, Set<string>>();
+	private terminatedSubagents = new Map<string, SessionInfo>();
   private server: net.Server;
   private shutdownTimer: NodeJS.Timeout | null = null;
 
@@ -248,6 +249,10 @@ class IntercomBroker {
         if (byId) {
           return { session: byId, receiver: this.toResolvedTargetIdentity(byId.info) };
         }
+        const terminated = this.terminatedSubagents.get(target.intercomSessionId);
+        if (terminated?.subagent) {
+          return { session: null, failure: { code: "target-terminated", runId: terminated.subagent.runId, agent: terminated.subagent.agent, index: terminated.subagent.index } };
+        }
         return {
           session: null,
           failure: { code: "expired-target" },
@@ -277,6 +282,10 @@ class IntercomBroker {
         }
 
         if (target.reconnect === "same-intercom-session") {
+          const terminated = this.terminatedSubagents.get(target.intercomSessionId);
+          if (terminated?.subagent) {
+            return { session: null, failure: { code: "target-terminated", runId: terminated.subagent.runId, agent: terminated.subagent.agent, index: terminated.subagent.index } };
+          }
           return {
             session: null,
             failure: { code: "expired-target" },
@@ -293,6 +302,11 @@ class IntercomBroker {
         if (byPiSessionId.length === 1) {
           const resolved = byPiSessionId[0]!;
           return { session: resolved, receiver: this.toResolvedTargetIdentity(resolved.info) };
+        }
+
+        const terminated = this.terminatedSubagents.get(target.intercomSessionId);
+        if (terminated?.subagent) {
+          return { session: null, failure: { code: "target-terminated", runId: terminated.subagent.runId, agent: terminated.subagent.agent, index: terminated.subagent.index } };
         }
 
         return {
@@ -361,6 +375,10 @@ class IntercomBroker {
     this.removeIndexValue(this.piSessionIndex, session.info.piSessionId, id);
     this.removeIndexValue(this.scopedAliasIndex, this.scopedAliasKey(session.info.namespace, session.info.alias), id);
     this.removeIndexValue(this.globalAliasIndex, session.info.alias.toLowerCase(), id);
+	if (session.info.subagent) {
+		this.terminatedSubagents.set(id, session.info);
+		while (this.terminatedSubagents.size > 100) this.terminatedSubagents.delete(this.terminatedSubagents.keys().next().value!);
+	}
     return session;
   }
 

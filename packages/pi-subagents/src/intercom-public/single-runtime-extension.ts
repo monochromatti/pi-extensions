@@ -29,7 +29,12 @@ import type { SupervisorIntercomTarget } from "../shared/types.ts";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
+const SUBAGENT_SUPERVISOR_WAIT_MODE_ENV = "PI_SUBAGENT_SUPERVISOR_WAIT_MODE";
 const INBOUND_FLUSH_DELAY_MS = 200;
+
+function isRoutineSupervisorExecutionRelay(message: string): boolean {
+  return /\b(?:please\s+)?(?:run|execute|write|edit|create)\s+(?:this|the|a|an)?\s*(?:script|command|file|audit)\b/i.test(message);
+}
 const INBOUND_IDLE_RETRY_MS = 500;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
 const MAX_DROPPED_MISROUTE_DIAGNOSTICS = 50;
@@ -1834,6 +1839,16 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       }),
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         const reason = params.reason as ContactSupervisorReason;
+		if (
+			process.env[SUBAGENT_SUPERVISOR_WAIT_MODE_ENV] === "foreground"
+			&& (reason === "need_decision" || reason === "interview_request")
+		) {
+			return {
+				content: [{ type: "text", text: "Supervisor decision unavailable in foreground subagent run. Return a blocked decision result; supervisor must relaunch this task with async: true to answer live." }],
+				isError: true,
+				details: { error: true, failure: { code: "supervisor-unavailable-foreground" } },
+			};
+		}
         if (reason !== "need_decision" && reason !== "progress_update" && reason !== "interview_request") {
           return {
             content: [{ type: "text", text: "Invalid reason. Use 'need_decision', 'interview_request', or 'progress_update'." }],
@@ -1848,6 +1863,13 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
             details: { error: true },
           };
         }
+		if (reason === "need_decision" && isRoutineSupervisorExecutionRelay(params.message as string)) {
+			return {
+				content: [{ type: "text", text: "Routine execution cannot be delegated to supervisor. Return a blocked_capability result naming missing tool/input, or rerun with an agent that has required capability." }],
+				isError: true,
+				details: { error: true, failure: { code: "blocked-capability" } },
+			};
+		}
         const interviewValidation = reason === "interview_request"
           ? validateSupervisorInterviewRequest(params.interview)
           : undefined;
@@ -2151,6 +2173,13 @@ Usage:
       syncPresenceStatus();
 
       const { action, to, message, attachments, replyTo, waitForReadyMs } = params;
+      if (childOrchestratorMetadata && action !== "list" && action !== "status") {
+        return {
+          content: [{ type: "text", text: "Delegated children cannot use generic Intercom messaging. Use contact_supervisor for a decision or progress update; return normal completion through subagent." }],
+          isError: true,
+          details: { error: true, failure: { code: "child-generic-intercom-disabled" } },
+        };
+      }
       if (waitForReadyMs !== undefined && (!Number.isFinite(waitForReadyMs) || waitForReadyMs < 0)) {
         return {
           content: [{ type: "text", text: "waitForReadyMs must be a non-negative number." }],

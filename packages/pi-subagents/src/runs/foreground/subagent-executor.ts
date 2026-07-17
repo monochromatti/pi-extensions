@@ -42,6 +42,7 @@ import { finalizeSingleOutput, injectSingleOutputInstruction, resolveSingleOutpu
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, resolveChildCwd } from "../../shared/utils.ts";
 import { readStatus } from "../background/status-store.ts";
 import { buildRunPlan } from "../plan/run-plan.ts";
+import { getArtifactPaths } from "../../shared/artifacts.ts";
 import {
 	buildSubagentResultIntercomPayload,
 	deliverSubagentIntercomMessageEvent,
@@ -183,6 +184,23 @@ function getCompletedForegroundRun(state: SubagentState, runId: string | undefin
 	return undefined;
 }
 
+function collectForegroundRun(state: SubagentState, runId: string | undefined): AgentToolResult<Details> {
+	const run = getCompletedForegroundRun(state, runId);
+	if (!run) {
+		return { content: [{ type: "text", text: "No completed foreground run found. Supply its exact run id from subagent status." }], isError: true, details: { mode: "management", results: [] } };
+	}
+	const sections: string[] = [];
+	for (const child of run.children) {
+		const heading = `## Child ${child.index + 1}: ${child.agent} (${child.status})`;
+		let body = child.finalOutput;
+		if (child.artifactPath && fs.existsSync(child.artifactPath)) {
+			try { body = fs.readFileSync(child.artifactPath, "utf8"); } catch { /* retain final output */ }
+		}
+		sections.push(`${heading}\n\n${(body ?? child.error ?? "No result output.").slice(0, 12_000)}`);
+	}
+	return { content: [{ type: "text", text: sections.join("\n\n") }], details: { mode: "management", results: [] } };
+}
+
 function rememberForegroundRun(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; results: SingleResult[] }): void {
 	state.foregroundRuns ??= new Map();
 	state.foregroundRuns.set(input.runId, {
@@ -193,7 +211,7 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 		children: input.results.map((result, index) => ({
 			agent: result.agent,
 			index,
-			status: resolveSubagentResultStatus({ exitCode: result.exitCode, interrupted: result.interrupted, detached: result.detached }),
+			status: resolveSubagentResultStatus({ exitCode: result.exitCode, interrupted: result.interrupted, detached: result.detached, terminalStatus: result.terminalStatus }),
 			...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
 			...(result.artifactPaths?.outputPath ? { artifactPath: result.artifactPaths.outputPath } : {}),
 			...(result.finalOutput ? { finalOutput: result.finalOutput } : {}),
@@ -921,6 +939,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 		orchestratorIntercomCwd: data.intercomBridge.active ? ctx.cwd : undefined,
 		supervisorIntercomTarget: data.intercomBridge.supervisorTarget,
+		supervisorWaitMode: "foreground",
 		foregroundControl,
 		chainSkills,
 		maxSubagentDepth: currentMaxSubagentDepth,
@@ -960,6 +979,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			controlConfig,
 			controlIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 			supervisorIntercomTarget: data.intercomBridge.supervisorTarget,
+			supervisorWaitMode: "foreground",
 			childIntercomTarget: data.intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(id, agent, index) : undefined,
 		});
 	}
@@ -1107,6 +1127,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 			orchestratorIntercomCwd: input.orchestratorIntercomCwd,
 			supervisorIntercomTarget: input.supervisorIntercomTarget,
+			supervisorWaitMode: "foreground",
 			modelOverride: input.modelOverrides[index],
 			thinkingOverride: input.thinkingOverrides[index],
 			availableModels: input.availableModels,
@@ -1213,8 +1234,14 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		normalizeSkillInput(t.skill),
 	);
 	const behaviorOverrides: StepOverrides[] = tasks.map((task, index) => ({
-		...(task.output !== undefined ? { output: task.output === true ? agentConfigs[index]?.output ?? false : task.output } : {}),
-		...(task.outputMode !== undefined ? { outputMode: task.outputMode } : {}),
+		// Every parallel child gets a unique runner-owned result file. Agent
+		// manifest defaults such as research.md are collision-prone shared paths.
+		output: task.output === false
+			? false
+			: task.output === true
+				? getArtifactPaths(artifactsDir, runId, task.agent, index).outputPath
+				: task.output ?? getArtifactPaths(artifactsDir, runId, task.agent, index).outputPath,
+		outputMode: task.outputMode ?? "file-only",
 		...(task.reads !== undefined && task.reads !== true ? { reads: task.reads } : {}),
 		...(task.progress !== undefined ? { progress: task.progress } : {}),
 		...(skillOverrides[index] !== undefined ? { skills: skillOverrides[index] } : {}),
@@ -1279,6 +1306,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 			orchestratorIntercomCwd: data.intercomBridge.active ? ctx.cwd : undefined,
 			supervisorIntercomTarget: data.intercomBridge.supervisorTarget,
+			supervisorWaitMode: "foreground",
 			foregroundControl,
 			concurrencyLimit: parallelConcurrency,
 			maxSubagentDepths,
@@ -1479,6 +1507,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 		orchestratorIntercomCwd: data.intercomBridge.active ? ctx.cwd : undefined,
 		supervisorIntercomTarget: data.intercomBridge.supervisorTarget,
+		supervisorWaitMode: "foreground",
 		index: 0,
 		modelOverride,
 		thinkingOverride,
@@ -1597,6 +1626,9 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			const completedForeground = getCompletedForegroundRun(deps.state, surfaceRequest.id ?? surfaceRequest.runId);
 			if (completedForeground) return completedForegroundStatusResult(completedForeground);
 			return inspectSubagentStatus(surfaceRequest.params);
+		}
+		if (surfaceRequest.kind === "collect") {
+			return collectForegroundRun(deps.state, surfaceRequest.id ?? surfaceRequest.runId);
 		}
 		if (surfaceRequest.kind === "resume") {
 			return resumeAsyncRun({ params: surfaceRequest.params, requestCwd: surfaceRequest.requestedCwd, ctx, deps });

@@ -8,6 +8,27 @@ Minimal Pi extension for delegating work to subagents and messaging other Pi ses
 - `intercom` — list/send/ask/reply/pending/status messages between local Pi sessions.
 - `contact_supervisor` — available only inside delegated child sessions with supervisor metadata.
 
+## Safe delegation defaults
+
+- Children start with `context: "fresh"` unless caller explicitly requests `context: "fork"`.
+- Parallel children receive unique runner-owned artifact files automatically. Do not make same-agent tasks write a shared `research.md` or shared `/tmp` path.
+- Use `requiredTools` when task needs a capability. Runner rejects mismatch before child spawn.
+- Normal child completion returns through `subagent`, not Intercom. Use Intercom only for live decisions/progress, never routine completion or supervisor shell-work relay.
+- Retrieve completed foreground artifacts without rerunning work: `subagent({ action: "collect", id: "<run-id>" })`.
+- A foreground child cannot wait for a supervisor decision. It receives an immediate error and must return a blocked result; launch decision-capable work with `async: true`. Async `status` displays `waiting_decision`; `resume` routes answer to that exact live child.
+- Delegated children cannot use generic `intercom` messaging. They may inspect `list`/`status`; use `contact_supervisor` for decision/progress coordination.
+
+```js
+subagent({
+  tasks: [
+    { agent: "worker", task: "Audit JSON with Python", requiredTools: ["bash"] },
+    { agent: "researcher", task: "Find official method references" },
+  ],
+  concurrency: 2,
+  context: "fresh",
+})
+```
+
 ## Examples
 
 Single:

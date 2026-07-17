@@ -41,7 +41,12 @@ export interface NormalizedResumeRequest extends NormalizedRequestBase {
 	runId?: string;
 	index?: number;
 }
-export type NormalizedControlRequest = NormalizedStatusRequest | NormalizedInterruptRequest | NormalizedResumeRequest;
+export interface NormalizedCollectRequest extends NormalizedRequestBase {
+	kind: "collect";
+	id?: string;
+	runId?: string;
+}
+export type NormalizedControlRequest = NormalizedStatusRequest | NormalizedInterruptRequest | NormalizedResumeRequest | NormalizedCollectRequest;
 
 export interface SurfaceRunRequest extends NormalizedRequestBase {
 	kind: "run-surface";
@@ -99,6 +104,7 @@ export function normalizeSubagentSurfaceRequest(input: { rawParams: SubagentPara
 	if (params.action === "status") return { ok: true, request: { ...base, kind: "status", id: params.id, runId: params.runId, dir: params.dir } };
 	if (params.action === "interrupt") return { ok: true, request: { ...base, kind: "interrupt", targetRunId: params.runId ?? params.id } };
 	if (params.action === "resume") return { ok: true, request: { ...base, kind: "resume", id: params.id, runId: params.runId, index: params.index } };
+	if (params.action === "collect") return { ok: true, request: { ...base, kind: "collect", id: params.id, runId: params.runId } };
 	return { ok: true, request: { ...base, kind: "run-surface" } };
 }
 
@@ -119,13 +125,8 @@ function buildRequestedModeError(params: SubagentParamsLike, message: string): A
 }
 
 export function applyAgentDefaultContext(params: SubagentParamsLike, agents: AgentConfig[]): SubagentParamsLike {
-	if (params.context !== undefined) return params;
-	const byName = new Map(agents.map((agent) => [agent.name, agent]));
-	const names: string[] = [];
-	if (params.agent) names.push(params.agent);
-	for (const task of params.tasks ?? []) names.push(task.agent);
-	for (const step of params.chain ?? []) names.push(...getStepAgents(step));
-	return names.some((name) => byName.get(name)?.defaultContext === "fork") ? { ...params, context: "fork" } : params;
+	void agents;
+	return params.context === undefined ? { ...params, context: "fresh" } : params;
 }
 
 export function expandTopLevelTaskCounts(tasks: TaskParam[]): { tasks?: TaskParam[]; error?: string } {
@@ -192,6 +193,18 @@ function executionError(params: SubagentParamsLike, mode: Details["mode"], messa
 	return { content: [{ type: "text", text: message }], isError: true, details: { mode, results: [] } };
 }
 
+function validateRequiredTools(
+	agent: AgentConfig,
+	requiredTools: string[] | undefined,
+	context: string,
+): string | undefined {
+	if (!requiredTools?.length) return undefined;
+	const available = new Set(agent.tools ?? []);
+	const missing = requiredTools.filter((tool) => !available.has(tool));
+	if (missing.length === 0) return undefined;
+	return `${context} selects ${agent.name}, which lacks required tool${missing.length === 1 ? "" : "s"} ${missing.join(", ")}. Available tools: ${(agent.tools ?? []).join(", ") || "none"}. Choose an agent with required tools or remove requiredTools.`;
+}
+
 export function validateSubagentRunRequest(input: { shape: NormalizedRunShape; executionAgents: AgentConfig[] }): NormResult<NormalizedRunRequest> {
 	const params = input.shape.params;
 	const agents = input.executionAgents;
@@ -202,8 +215,18 @@ export function validateSubagentRunRequest(input: { shape: NormalizedRunShape; e
 		return { ok: false, result: executionError(params, "single", `Provide exactly one mode. Agents: ${agents.map((a) => a.name).join(", ") || "none"}`) };
 	}
 	if (hasSingle && params.agent && !agents.find((agent) => agent.name === params.agent)) return { ok: false, result: executionError(params, "single", `Unknown agent: ${params.agent}`) };
+	if (hasSingle && params.agent) {
+		const error = validateRequiredTools(agents.find((agent) => agent.name === params.agent)!, params.requiredTools, "Single run");
+		if (error) return { ok: false, result: executionError(params, "single", error) };
+	}
 	if (hasTasks && params.tasks) {
-		for (let i = 0; i < params.tasks.length; i++) if (!agents.find((agent) => agent.name === params.tasks![i]!.agent)) return { ok: false, result: executionError(params, "parallel", `Unknown agent: ${params.tasks[i]!.agent} (task ${i + 1})`) };
+		for (let i = 0; i < params.tasks.length; i++) {
+			const task = params.tasks[i]!;
+			const agent = agents.find((candidate) => candidate.name === task.agent);
+			if (!agent) return { ok: false, result: executionError(params, "parallel", `Unknown agent: ${task.agent} (task ${i + 1})`) };
+			const error = validateRequiredTools(agent, task.requiredTools, `Parallel task ${i + 1}`);
+			if (error) return { ok: false, result: executionError(params, "parallel", error) };
+		}
 	}
 	if (hasChain && params.chain) {
 		if (params.chain.length === 0) return { ok: false, result: executionError(params, "chain", "Chain must have at least one step") };
@@ -216,6 +239,17 @@ export function validateSubagentRunRequest(input: { shape: NormalizedRunShape; e
 			const step = params.chain[i] as ChainStep;
 			for (const agentName of getStepAgents(step)) if (!agents.find((a) => a.name === agentName)) return { ok: false, result: executionError(params, "chain", `Unknown agent: ${agentName} (step ${i + 1})`) };
 			if (isParallelStep(step) && step.parallel.length === 0) return { ok: false, result: executionError(params, "chain", `Parallel step ${i + 1} must have at least one task`) };
+			if (isParallelStep(step)) {
+				for (const task of step.parallel) {
+					const agent = agents.find((candidate) => candidate.name === task.agent)!;
+					const error = validateRequiredTools(agent, task.requiredTools, `Chain step ${i + 1} parallel task ${task.agent}`);
+					if (error) return { ok: false, result: executionError(params, "chain", error) };
+				}
+			} else {
+				const agent = agents.find((candidate) => candidate.name === step.agent)!;
+				const error = validateRequiredTools(agent, step.requiredTools, `Chain step ${i + 1}`);
+				if (error) return { ok: false, result: executionError(params, "chain", error) };
+			}
 		}
 	}
 	const base = { ...input.shape, kind: "run" as const, params, effectiveCwd: params.cwd ?? input.shape.requestedCwd, context: params.context, control: params.control, sessionDir: params.sessionDir, maxOutput: params.maxOutput, includeProgress: params.includeProgress };

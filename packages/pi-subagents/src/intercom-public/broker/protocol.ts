@@ -234,6 +234,16 @@ function decodeDeliveryFailure(value: unknown, scope: "client" | "broker", conte
       assertNoUnknownKeys(record, ["code"], scope, context);
       return { code };
     }
+	case "target-terminated": {
+		assertNoUnknownKeys(record, ["code", "runId", "agent", "index"], scope, context);
+		if (!Number.isInteger(record.index) || (record.index as number) < 0) throw protocolError(scope, `${context}.index`);
+		return {
+			code,
+			runId: asNonEmptyString(record.runId, scope, `${context}.runId`),
+			agent: asNonEmptyString(record.agent, scope, `${context}.agent`),
+			index: record.index as number,
+		};
+	}
     case "ambiguous-alias": {
       assertNoUnknownKeys(record, ["code", "label", "candidates"], scope, context);
       if (!Array.isArray(record.candidates) || record.candidates.length === 0) {

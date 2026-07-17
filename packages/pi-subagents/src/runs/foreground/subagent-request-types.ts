@@ -12,6 +12,7 @@ export interface TaskParam {
 	progress?: boolean;
 	model?: string;
 	thinking?: string;
+	requiredTools?: string[];
 	skill?: string | string[] | boolean;
 }
 
@@ -37,6 +38,7 @@ export interface SubagentParamsLike {
 	includeProgress?: boolean;
 	model?: string;
 	thinking?: string;
+	requiredTools?: string[];
 	skill?: string | string[] | boolean;
 	output?: string | boolean;
 	outputMode?: "inline" | "file-only";

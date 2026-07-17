@@ -83,7 +83,7 @@ export interface SupervisorIntercomTarget {
 	cwd: string;
 }
 
-export type SubagentResultStatus = "completed" | "failed" | "paused" | "detached";
+export type SubagentResultStatus = "completed" | "failed" | "paused" | "detached" | "blocked_capability" | "blocked_decision";
 export type SubagentRunMode = "single" | "parallel" | "chain";
 
 export interface SubagentResultIntercomChild {
@@ -131,7 +131,7 @@ export interface SubagentResultIntercomPayload {
 export interface AgentProgress {
 	index: number;
 	agent: string;
-	status: "pending" | "running" | "completed" | "failed" | "detached";
+	status: "pending" | "running" | "completed" | "failed" | "detached" | "blocked_capability" | "blocked_decision";
 	activityState?: ActivityState;
 	task: string;
 	skills?: string[];
@@ -177,6 +177,7 @@ export interface SingleResult {
 	agent: string;
 	task: string;
 	exitCode: number;
+	terminalStatus?: SubagentResultStatus;
 	detached?: boolean;
 	detachedReason?: string;
 	interrupted?: boolean;
@@ -275,7 +276,7 @@ export interface AsyncStatus {
 	runId: string;
 	sessionId?: string;
 	mode: SubagentRunMode;
-	state: "queued" | "running" | "complete" | "failed" | "paused";
+	state: "queued" | "running" | "waiting_decision" | "complete" | "failed" | "paused";
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;
@@ -293,7 +294,7 @@ export interface AsyncStatus {
 	parallelGroups?: AsyncParallelGroupStatus[];
 	steps?: Array<{
 		agent: string;
-		status: "pending" | "running" | "complete" | "completed" | "failed" | "paused";
+		status: "pending" | "running" | "waiting_decision" | "complete" | "completed" | "failed" | "paused";
 		sessionFile?: string;
 		activityState?: ActivityState;
 		lastActivityAt?: number;
@@ -329,7 +330,7 @@ export type AsyncJobStep = NonNullable<AsyncStatus["steps"]>[number] & {
 export interface AsyncJobState {
 	asyncId: string;
 	asyncDir: string;
-	status: "queued" | "running" | "complete" | "failed" | "paused";
+	status: "queued" | "running" | "waiting_decision" | "complete" | "failed" | "paused";
 	pid?: number;
 	sessionId?: string;
 	activityState?: ActivityState;
@@ -463,6 +464,7 @@ export interface RunSyncOptions {
 	orchestratorIntercomTarget?: string;
 	orchestratorIntercomCwd?: string;
 	supervisorIntercomTarget?: SupervisorIntercomTarget;
+	supervisorWaitMode?: "foreground" | "async";
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
 	artifactConfig?: ArtifactConfig;
@@ -544,7 +546,7 @@ export const SLASH_SUBAGENT_CANCEL_EVENT = "subagent:slash:cancel";
 export const POLL_INTERVAL_MS = 250;
 export const MAX_WIDGET_JOBS = 4;
 export { DEFAULT_SUBAGENT_MAX_DEPTH } from "./depth.ts";
-export const SUBAGENT_CONTROL_ACTIONS = ["status", "interrupt", "resume"] as const;
+export const SUBAGENT_CONTROL_ACTIONS = ["status", "interrupt", "resume", "collect"] as const;
 
 export const DEFAULT_FORK_PREAMBLE =
 	"You are a delegated subagent running from a fork of the parent session. " +
