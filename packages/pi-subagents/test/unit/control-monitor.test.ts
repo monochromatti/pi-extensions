@@ -7,6 +7,7 @@ test("4.1/4.2 no event before idle threshold, pure quiet becomes active_long_run
 		config: {
 			enabled: true,
 			needsAttentionAfterMs: 1_000,
+			toolNeedsAttentionAfterMs: 300_000,
 			activeNoticeAfterMs: 10_000,
 			failedToolAttemptsBeforeAttention: 3,
 			notifyOn: ["active_long_running", "needs_attention"],
@@ -30,6 +31,7 @@ test("4.3/4.4 duplicate pure quiet active_long_running ticks deduped", () => {
 		config: {
 			enabled: true,
 			needsAttentionAfterMs: 10,
+			toolNeedsAttentionAfterMs: 300_000,
 			activeNoticeAfterMs: 10_000,
 			failedToolAttemptsBeforeAttention: 3,
 			notifyOn: ["active_long_running", "needs_attention"],
@@ -51,6 +53,7 @@ test("4.5/4.6 long-running thresholds emit active_long_running before idle atten
 	const baseConfig = {
 		enabled: true,
 		needsAttentionAfterMs: 10_000,
+		toolNeedsAttentionAfterMs: 300_000,
 		activeNoticeAfterMs: 500,
 		failedToolAttemptsBeforeAttention: 3,
 		notifyOn: ["active_long_running", "needs_attention"] as const,
@@ -83,11 +86,35 @@ test("4.5/4.6 long-running thresholds emit active_long_running before idle atten
 	assert.equal(tokenEvent?.reason, "token_threshold");
 });
 
+test("tool calls use separate needs-attention threshold", () => {
+	const monitor = createControlMonitor({
+		config: {
+			enabled: true,
+			needsAttentionAfterMs: 60_000,
+			toolNeedsAttentionAfterMs: 300_000,
+			activeNoticeAfterMs: 600_000,
+			failedToolAttemptsBeforeAttention: 3,
+			notifyOn: ["active_long_running", "needs_attention"],
+			notifyChannels: ["event"],
+		},
+		runId: "run-tool",
+		agent: "worker",
+		startedAt: 1_000,
+	});
+
+	const beforeToolThreshold = monitor.tick({ now: 62_000, turns: 0, tokens: 0, toolCount: 1, currentTool: "bash" });
+	assert.equal(beforeToolThreshold, undefined);
+
+	const afterToolThreshold = monitor.tick({ now: 302_000, turns: 0, tokens: 0, toolCount: 1, currentTool: "bash" });
+	assert.equal(afterToolThreshold?.type, "needs_attention");
+});
+
 test("4.7/4.8 mutating tool failure escalation emits needs_attention with summary", () => {
 	const monitor = createControlMonitor({
 		config: {
 			enabled: true,
 			needsAttentionAfterMs: 60_000,
+			toolNeedsAttentionAfterMs: 300_000,
 			activeNoticeAfterMs: 120_000,
 			failedToolAttemptsBeforeAttention: 2,
 			notifyOn: ["active_long_running", "needs_attention"],

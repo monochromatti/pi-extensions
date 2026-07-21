@@ -37,6 +37,7 @@ export type ControlNotificationChannel = "event" | "async" | "intercom";
 export interface ControlConfig {
 	enabled?: boolean;
 	needsAttentionAfterMs?: number;
+	toolNeedsAttentionAfterMs?: number;
 	activeNoticeAfterMs?: number;
 	activeNoticeAfterTurns?: number;
 	activeNoticeAfterTokens?: number;
@@ -48,6 +49,7 @@ export interface ControlConfig {
 export interface ResolvedControlConfig {
 	enabled: boolean;
 	needsAttentionAfterMs: number;
+	toolNeedsAttentionAfterMs: number;
 	activeNoticeAfterMs: number;
 	activeNoticeAfterTurns?: number;
 	activeNoticeAfterTokens?: number;

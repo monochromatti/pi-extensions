@@ -1070,6 +1070,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				startedAt: step.startedAt ?? overallStartTime,
 				lastActivityAt,
 				now,
+				currentTool: step.currentTool,
 			});
 			if (idleState === "needs_attention") {
 				const previous = step.activityState;

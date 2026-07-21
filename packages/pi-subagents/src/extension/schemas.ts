@@ -50,6 +50,7 @@ const RequiredToolsOverride = Type.Array(Type.String({ minLength: 1 }), {
 const ControlOverrides = Type.Object({
 	enabled: Type.Optional(Type.Boolean({ description: "Enable child attention tracking for this run" })),
 	needsAttentionAfterMs: Type.Optional(Type.Integer({ minimum: 1, description: "Idle window before child needs attention" })),
+	toolNeedsAttentionAfterMs: Type.Optional(Type.Integer({ minimum: 1, description: "Idle window before child needs attention while a tool call is running" })),
 	activeNoticeAfterMs: Type.Optional(Type.Integer({ minimum: 1, description: "Long-running notice threshold by elapsed ms" })),
 	activeNoticeAfterTurns: Type.Optional(Type.Integer({ minimum: 1, description: "Long-running notice threshold by assistant turns" })),
 	activeNoticeAfterTokens: Type.Optional(Type.Integer({ minimum: 1, description: "Long-running notice threshold by total tokens" })),

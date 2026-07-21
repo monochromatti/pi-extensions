@@ -122,6 +122,7 @@ export function createControlMonitor(input: CreateControlMonitorInput): ControlM
 				startedAt: input.startedAt,
 				lastActivityAt,
 				now: tickInput.now,
+				currentTool: tickInput.currentTool,
 			});
 			if (idleState === "needs_attention") {
 				if (!tickInput.currentTool) {

@@ -380,6 +380,7 @@ async function runSingleAttempt(
 				startedAt: startTime,
 				lastActivityAt: progress.lastActivityAt,
 				now,
+				currentTool: progress.currentTool,
 			});
 			if (idleState === "needs_attention") {
 				if (!progress.currentTool) {

@@ -14,6 +14,7 @@ const DEFAULT_NOTIFY_ON: ControlEventType[] = ["active_long_running", "needs_att
 export const DEFAULT_CONTROL_CONFIG: ResolvedControlConfig = {
 	enabled: true,
 	needsAttentionAfterMs: 60_000,
+	toolNeedsAttentionAfterMs: 300_000,
 	activeNoticeAfterMs: 240_000,
 	failedToolAttemptsBeforeAttention: 3,
 	notifyOn: DEFAULT_NOTIFY_ON,
@@ -42,6 +43,9 @@ export function resolveControlConfig(
 	const needsAttentionAfterMs = parsePositiveInt(override?.needsAttentionAfterMs)
 		?? parsePositiveInt(globalConfig?.needsAttentionAfterMs)
 		?? DEFAULT_CONTROL_CONFIG.needsAttentionAfterMs;
+	const toolNeedsAttentionAfterMs = parsePositiveInt(override?.toolNeedsAttentionAfterMs)
+		?? parsePositiveInt(globalConfig?.toolNeedsAttentionAfterMs)
+		?? DEFAULT_CONTROL_CONFIG.toolNeedsAttentionAfterMs;
 	const activeNoticeAfterMs = parsePositiveInt(override?.activeNoticeAfterMs)
 		?? parsePositiveInt(globalConfig?.activeNoticeAfterMs)
 		?? DEFAULT_CONTROL_CONFIG.activeNoticeAfterMs;
@@ -61,6 +65,7 @@ export function resolveControlConfig(
 	return {
 		enabled,
 		needsAttentionAfterMs,
+		toolNeedsAttentionAfterMs,
 		activeNoticeAfterMs,
 		activeNoticeAfterTurns,
 		activeNoticeAfterTokens,
@@ -75,12 +80,14 @@ export function deriveActivityState(input: {
 	startedAt: number;
 	lastActivityAt?: number;
 	now?: number;
+	currentTool?: string;
 }): ActivityState | undefined {
 	if (!input.config.enabled) return undefined;
 	const now = input.now ?? Date.now();
 	const lastActivity = input.lastActivityAt ?? input.startedAt;
 	const ageMs = Math.max(0, now - lastActivity);
-	return ageMs > input.config.needsAttentionAfterMs ? "needs_attention" : undefined;
+	const thresholdMs = input.currentTool ? input.config.toolNeedsAttentionAfterMs : input.config.needsAttentionAfterMs;
+	return ageMs > thresholdMs ? "needs_attention" : undefined;
 }
 
 export function buildControlEvent(input: {
