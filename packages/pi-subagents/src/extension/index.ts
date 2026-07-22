@@ -32,6 +32,7 @@ import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import registerSubagentNotify, { type SubagentNotifyDetails } from "../runs/background/notify.ts";
 import { SUBAGENT_CHILD_ENV } from "../runs/shared/pi-args.ts";
 import { formatDuration, shortenPath } from "../shared/formatters.ts";
+import { addSubagentCostToAssistantMessage, subagentCost } from "../shared/subagent-cost.ts";
 import {
 	type Details,
 	type ExtensionConfig,
@@ -206,6 +207,21 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			schedule: () => false,
 			clear: () => {},
 		},
+	};
+
+	// Host footer sums assistant-message usage. Queue child spend and fold it into
+	// next parent assistant message without adding synthetic conversation messages.
+	const pendingSubagentCosts = new Map<string, number>();
+	const sessionKey = (ctx: ExtensionContext): string => {
+		try {
+			return resolveCurrentSessionId(ctx.sessionManager);
+		} catch {
+			return state.currentSessionId ?? "__current__";
+		}
+	};
+	const queueSubagentCost = (key: string, cost: number): void => {
+		if (!Number.isFinite(cost) || cost <= 0) return;
+		pendingSubagentCosts.set(key, (pendingSubagentCosts.get(key) ?? 0) + cost);
 	};
 
 	const { startResultWatcher, primeExistingResults, stopResultWatcher } = createResultWatcher(
@@ -384,8 +400,19 @@ CONTROL:
 			details: payload as SubagentControlMessageDetails,
 		});
 	};
+	const asyncCompleteCostHandler = (payload: unknown) => {
+		if (!payload || typeof payload !== "object") return;
+		const data = payload as { sessionId?: unknown; ownerPiSessionId?: unknown };
+		const ownerSession = typeof data.sessionId === "string"
+			? data.sessionId
+			: typeof data.ownerPiSessionId === "string" ? data.ownerPiSessionId : state.currentSessionId;
+		if (!ownerSession) return;
+		if (state.currentSessionId && ownerSession !== state.currentSessionId) return;
+		queueSubagentCost(ownerSession, subagentCost(payload));
+	};
 	const eventUnsubscribes = [
 		pi.events.on(SUBAGENT_ASYNC_STARTED_EVENT, handleStarted),
+		pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, asyncCompleteCostHandler),
 		pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, handleComplete),
 		pi.events.on(SUBAGENT_CONTROL_EVENT, controlEventHandler),
 	];
@@ -393,12 +420,22 @@ CONTROL:
 
 	pi.on("tool_result", (event, ctx) => {
 		if (event.toolName !== "subagent") return;
+		queueSubagentCost(sessionKey(ctx), subagentCost(event.details));
 		if (!ctx.hasUI) return;
 		state.lastUiContext = ctx;
 		if (state.asyncJobs.size > 0) {
 			renderWidget(ctx, Array.from(state.asyncJobs.values()));
 			ensurePoller();
 		}
+	});
+
+	pi.on("message_end", (event, ctx) => {
+		if (event.message.role !== "assistant") return;
+		const key = sessionKey(ctx);
+		const pending = pendingSubagentCosts.get(key) ?? 0;
+		if (pending <= 0) return;
+		pendingSubagentCosts.delete(key);
+		return { message: addSubagentCostToAssistantMessage(event.message, pending) };
 	});
 
 	const cleanupSessionArtifacts = (ctx: ExtensionContext) => {
@@ -446,6 +483,7 @@ CONTROL:
 		}
 		state.cleanupTimers.clear();
 		state.asyncJobs.clear();
+		pendingSubagentCosts.clear();
 		stopWidgetAnimation();
 		stopResultAnimations();
 		if (globalStore[runtimeCleanupStoreKey] === runtimeCleanup) {
