@@ -18,6 +18,7 @@ export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 export const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 export const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
 export const SUBAGENT_SUPERVISOR_WAIT_MODE_ENV = "PI_SUBAGENT_SUPERVISOR_WAIT_MODE";
+export const SUBAGENT_INTERCOM_SESSION_NAME_ENV = "PI_SUBAGENT_INTERCOM_SESSION_NAME";
 
 export interface BuildPiArgsInput {
 	baseArgs: string[];
@@ -140,7 +141,7 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT = input.inheritProjectContext ? "1" : "0";
 	env.PI_SUBAGENT_INHERIT_SKILLS = input.inheritSkills ? "1" : "0";
 	if (input.intercomSessionName) {
-		env.PI_SUBAGENT_INTERCOM_SESSION_NAME = input.intercomSessionName;
+		env[SUBAGENT_INTERCOM_SESSION_NAME_ENV] = input.intercomSessionName;
 	}
 	if (input.orchestratorIntercomTarget) {
 		env[SUBAGENT_ORCHESTRATOR_TARGET_ENV] = input.orchestratorIntercomTarget;

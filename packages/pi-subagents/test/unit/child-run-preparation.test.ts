@@ -6,12 +6,15 @@ import {
 	SUBAGENT_CHILD_AGENT_ENV,
 	SUBAGENT_CHILD_ENV,
 	SUBAGENT_CHILD_INDEX_ENV,
+	SUBAGENT_INTERCOM_SESSION_NAME_ENV,
+	SUBAGENT_ORCHESTRATOR_CWD_ENV,
 	SUBAGENT_ORCHESTRATOR_TARGET_ENV,
 	SUBAGENT_SUPERVISOR_ALIAS_ENV,
 	SUBAGENT_SUPERVISOR_CWD_ENV,
 	SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID_ENV,
 	SUBAGENT_SUPERVISOR_PI_SESSION_ID_ENV,
 	SUBAGENT_RUN_ID_ENV,
+	SUBAGENT_SUPERVISOR_WAIT_MODE_ENV,
 } from "../../src/runs/shared/pi-args.ts";
 
 test("child-run preparation hides Pi args/env/depth setup", () => {
@@ -81,4 +84,54 @@ test("child-run preparation owns long task temp file cleanup", () => {
 	assert.ok(prepared.args.some((arg) => arg.startsWith("@")));
 	prepared.cleanup();
 	assert.equal(fs.existsSync(prepared.tempDir), false);
+});
+
+test("child-run preparation scrubs stale inherited routing before applying nested identity", () => {
+	const stale = {
+		[SUBAGENT_INTERCOM_SESSION_NAME_ENV]: "stale-child",
+		[SUBAGENT_ORCHESTRATOR_TARGET_ENV]: "stale-orchestrator",
+		[SUBAGENT_ORCHESTRATOR_CWD_ENV]: "/stale/orchestrator",
+		[SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID_ENV]: "stale-intercom",
+		[SUBAGENT_SUPERVISOR_PI_SESSION_ID_ENV]: "stale-pi",
+		[SUBAGENT_SUPERVISOR_ALIAS_ENV]: "stale-supervisor",
+		[SUBAGENT_SUPERVISOR_CWD_ENV]: "/stale/supervisor",
+		[SUBAGENT_RUN_ID_ENV]: "stale-run",
+		[SUBAGENT_CHILD_AGENT_ENV]: "stale-agent",
+		[SUBAGENT_CHILD_INDEX_ENV]: "99",
+		[SUBAGENT_SUPERVISOR_WAIT_MODE_ENV]: "foreground",
+	};
+	const previous = Object.fromEntries(Object.keys(stale).map((key) => [key, process.env[key]]));
+	Object.assign(process.env, stale);
+
+	try {
+		const prepared = prepareChildRun({
+			baseArgs: ["--mode", "json", "-p"],
+			task: "nested run",
+			identity: { runId: "nested-run", agentName: "nested-worker", childIndex: 1 },
+			context: { sessionEnabled: false, inheritProjectContext: true, inheritSkills: true },
+			capabilities: {},
+			supervisor: {
+				childIntercomTarget: "nested-child",
+				supervisorWaitMode: "async",
+			},
+		});
+
+		assert.equal(prepared.spawnEnv[SUBAGENT_INTERCOM_SESSION_NAME_ENV], "nested-child");
+		assert.equal(prepared.spawnEnv[SUBAGENT_RUN_ID_ENV], "nested-run");
+		assert.equal(prepared.spawnEnv[SUBAGENT_CHILD_AGENT_ENV], "nested-worker");
+		assert.equal(prepared.spawnEnv[SUBAGENT_CHILD_INDEX_ENV], "1");
+		assert.equal(prepared.spawnEnv[SUBAGENT_SUPERVISOR_WAIT_MODE_ENV], "async");
+		assert.equal(prepared.spawnEnv[SUBAGENT_ORCHESTRATOR_TARGET_ENV], undefined);
+		assert.equal(prepared.spawnEnv[SUBAGENT_ORCHESTRATOR_CWD_ENV], undefined);
+		assert.equal(prepared.spawnEnv[SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID_ENV], undefined);
+		assert.equal(prepared.spawnEnv[SUBAGENT_SUPERVISOR_PI_SESSION_ID_ENV], undefined);
+		assert.equal(prepared.spawnEnv[SUBAGENT_SUPERVISOR_ALIAS_ENV], undefined);
+		assert.equal(prepared.spawnEnv[SUBAGENT_SUPERVISOR_CWD_ENV], undefined);
+		prepared.cleanup();
+	} finally {
+		for (const [key, value] of Object.entries(previous)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
 });

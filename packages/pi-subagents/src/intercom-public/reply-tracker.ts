@@ -26,6 +26,7 @@ function buildReplyTarget(
 
 export class ReplyTracker {
   private readonly pendingAsks = new Map<string, IntercomContext>();
+  private readonly hostDeliveredAsks = new Set<string>();
   private readonly pendingTurnContexts: IntercomContext[] = [];
   private currentTurnContext: IntercomContext | null = null;
 
@@ -46,6 +47,12 @@ export class ReplyTracker {
 
   queueTurnContext(context: IntercomContext): void {
     this.pendingTurnContexts.push(context);
+    // Runtime queues turn context only after host send accepted. Suppressed asks
+    // remain visible through `pending`/explicit replyTo, but never become an
+    // implicit bare-reply target.
+    if (this.pendingAsks.has(context.message.id)) {
+      this.hostDeliveredAsks.add(context.message.id);
+    }
   }
 
   beginTurn(now = Date.now()): void {
@@ -59,6 +66,7 @@ export class ReplyTracker {
 
   reset(): void {
     this.pendingAsks.clear();
+    this.hostDeliveredAsks.clear();
     this.pendingTurnContexts.length = 0;
     this.currentTurnContext = null;
   }
@@ -79,7 +87,11 @@ export class ReplyTracker {
 
     const pending = Array.from(this.pendingAsks.values());
     if (pending.length === 1) {
-      return pending[0]!;
+      const only = pending[0]!;
+      if (this.hostDeliveredAsks.has(only.message.id)) {
+        return only;
+      }
+      throw new Error(`Cannot reply implicitly: pending ask ${contextLabel(only)} was not delivered to this host chat. Specify replyTo explicitly.`);
     }
 
     if (pending.length === 0) {
@@ -91,6 +103,7 @@ export class ReplyTracker {
 
   markReplied(replyTo: string): void {
     this.pendingAsks.delete(replyTo);
+    this.hostDeliveredAsks.delete(replyTo);
     if (this.currentTurnContext?.message.id === replyTo) {
       this.currentTurnContext = null;
     }
@@ -105,6 +118,7 @@ export class ReplyTracker {
     for (const [messageId, context] of this.pendingAsks) {
       if (now - context.receivedAt > this.askTimeoutMs) {
         this.pendingAsks.delete(messageId);
+        this.hostDeliveredAsks.delete(messageId);
       }
     }
   }

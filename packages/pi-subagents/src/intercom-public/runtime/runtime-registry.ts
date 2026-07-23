@@ -3,7 +3,6 @@ import type { IntercomRuntime } from "./intercom-runtime.ts";
 
 export class IntercomRuntimeRegistry {
   private readonly runtimes = new Map<string, IntercomRuntime>();
-  private activeHostSessionId: string | null = null;
 
   constructor(private readonly createRuntime: (piSessionId: string) => IntercomRuntime) {}
 
@@ -17,18 +16,17 @@ export class IntercomRuntimeRegistry {
   }
 
   canDeliverMessageToHost(runtimePiSessionId: string): boolean {
-    if (!this.runtimes.has(runtimePiSessionId)) {
-      return false;
-    }
-    if (!this.activeHostSessionId) {
-      return this.runtimes.size <= 1;
-    }
-    return this.activeHostSessionId === runtimePiSessionId;
+    // ExtensionAPI.sendMessage() has no session target. Lifecycle activity cannot
+    // prove which chat owns that shared host call, so fail closed when multiple
+    // session runtimes exist. Normal /new, /resume, /fork, and shutdown flows emit
+    // session_shutdown before the next session_start, leaving one runtime; more
+    // than one runtime means an overlapping/abnormal host state we cannot address
+    // safely through ExtensionAPI.
+    return this.runtimes.size === 1 && this.runtimes.has(runtimePiSessionId);
   }
 
   async startSession(event: unknown, ctx: ExtensionContext): Promise<void> {
     const piSessionId = ctx.sessionManager.getSessionId();
-    this.activeHostSessionId = piSessionId;
 
     const existing = this.runtimes.get(piSessionId);
     if (existing) {
@@ -51,13 +49,9 @@ export class IntercomRuntimeRegistry {
     if (this.runtimes.get(piSessionId) === runtime) {
       this.runtimes.delete(piSessionId);
     }
-    if (this.activeHostSessionId === piSessionId) {
-      this.activeHostSessionId = null;
-    }
   }
 
   async forwardSessionLifecycle(eventName: string, event: unknown, ctx: ExtensionContext): Promise<void> {
-    this.activeHostSessionId = ctx.sessionManager.getSessionId();
     const runtime = this.getForContext(ctx);
     if (!runtime) {
       return;

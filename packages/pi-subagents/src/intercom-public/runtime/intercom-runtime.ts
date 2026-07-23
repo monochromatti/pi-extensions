@@ -131,7 +131,9 @@ export class IntercomRuntime {
       },
       sendMessage: (message, sendOptions) => {
         if (!this.canDeliverMessageToHost(this.piSessionId)) {
-          return undefined;
+          // Private adapter contract: false means host delivery was suppressed.
+          // ExtensionAPI itself returns void, so any other result means accepted.
+          return false;
         }
         return this.hostPi.sendMessage(message, sendOptions);
       },

@@ -45,6 +45,30 @@ test("reply without replyTo fails when multiple pending asks exist and lists can
   );
 });
 
+test("bare reply cannot select sole ask suppressed before host delivery", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(session("sender-a"), ask("ask-a"));
+
+  assert.throws(
+    () => tracker.resolveReplyTarget({}),
+    /Cannot reply implicitly.*ask-a.*not delivered.*replyTo/s,
+  );
+
+  const explicit = tracker.resolveReplyTarget({ replyTo: "ask-a" });
+  assert.equal(explicit.message.id, "ask-a");
+});
+
+test("sole host-delivered ask remains eligible for bare reply", () => {
+  const tracker = new ReplyTracker();
+  const context = tracker.recordIncomingMessage(session("sender-a"), ask("ask-a"));
+  tracker.queueTurnContext(context);
+  tracker.beginTurn();
+  tracker.endTurn();
+
+  const resolved = tracker.resolveReplyTarget({});
+  assert.equal(resolved.message.id, "ask-a");
+});
+
 test("replyTo resolves exact original inbound message", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(session("sender-a"), ask("ask-a"));

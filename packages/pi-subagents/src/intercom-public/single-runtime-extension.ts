@@ -937,13 +937,14 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     });
   }
   function currentSessionTargetMatches(to: string | SendTargetEnvelope, activeClient?: IntercomClient): boolean {
+    const runtimeClient = activeClient ?? client ?? undefined;
     const targets = new Set<string>();
     const addTarget = (target: string | undefined | null) => {
       const trimmed = target?.trim();
       if (trimmed) targets.add(trimmed.toLowerCase());
     };
     addTarget(currentSessionId);
-    addTarget(activeClient?.sessionId);
+    addTarget(runtimeClient?.sessionId);
     addTarget(pi.getSessionName());
     addTarget(registeredRoutingAlias);
 
@@ -953,13 +954,14 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
 
     switch (to.kind) {
       case "intercom-session":
-        return targets.has(to.intercomSessionId.trim().toLowerCase());
+        return to.intercomSessionId.trim().toLowerCase() === runtimeClient?.sessionId?.trim().toLowerCase();
       case "pi-session":
-        return targets.has(to.piSessionId.trim().toLowerCase());
+        return to.piSessionId.trim().toLowerCase() === currentSessionId?.trim().toLowerCase();
       case "identity-snapshot":
-        return targets.has(to.intercomSessionId.trim().toLowerCase())
-          || targets.has(to.piSessionId.trim().toLowerCase())
-          || (to.alias ? targets.has(to.alias.trim().toLowerCase()) : false);
+        // Structured identity must match both exact IDs. Alias is diagnostic and
+        // must never override stale or mismatched IDs.
+        return to.intercomSessionId.trim().toLowerCase() === runtimeClient?.sessionId?.trim().toLowerCase()
+          && to.piSessionId.trim().toLowerCase() === currentSessionId?.trim().toLowerCase();
       case "scoped-alias":
       case "global-alias":
         return targets.has(to.alias.trim().toLowerCase());
@@ -969,7 +971,20 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) {
       return;
     }
-    if (delivery !== "followUp") {
+    const senderDisplay = entry.from.alias || entry.from.id.slice(0, 8);
+    const replyInstruction = entry.replyCommand ? `\n\nTo reply, use the intercom tool: ${entry.replyCommand}` : "";
+    const accepted = (pi.sendMessage as unknown as (message: unknown, options: unknown) => unknown)(
+      {
+        customType: "intercom_message",
+        content: `**📨 From ${senderDisplay}** (${entry.from.cwd})${replyInstruction}\n\n${entry.bodyText}`,
+        display: true,
+        details: entry,
+      },
+      delivery === "trigger"
+        ? { triggerTurn: true }
+        : { deliverAs: "followUp" }
+    );
+    if (accepted !== false && delivery !== "followUp") {
       replyTracker.queueTurnContext({
         from: entry.from,
         message: entry.message,
@@ -983,19 +998,6 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
         },
       });
     }
-    const senderDisplay = entry.from.alias || entry.from.id.slice(0, 8);
-    const replyInstruction = entry.replyCommand ? `\n\nTo reply, use the intercom tool: ${entry.replyCommand}` : "";
-    pi.sendMessage(
-      {
-        customType: "intercom_message",
-        content: `**📨 From ${senderDisplay}** (${entry.from.cwd})${replyInstruction}\n\n${entry.bodyText}`,
-        display: true,
-        details: entry,
-      },
-      delivery === "trigger"
-        ? { triggerTurn: true }
-        : { deliverAs: "followUp" }
-    );
   }
   function scheduleInboundFlush(delayMs = INBOUND_FLUSH_DELAY_MS): void {
     if (!getLiveContext()) {
@@ -1128,7 +1130,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       : "";
     const bodyText = `${deliveredMessage.content.text}${attachmentText}`;
     const replyCommand = config.replyHint && deliveredMessage.expectsReply
-      ? `intercom({ action: "reply", message: "..." })`
+      ? `intercom({ action: "reply", replyTo: "${deliveredMessage.id}", message: "..." })`
       : undefined;
     replyTracker.recordIncomingMessage(from, deliveredMessage);
     const entry = { from, message: deliveredMessage, replyCommand, bodyText };

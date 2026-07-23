@@ -367,6 +367,38 @@ test("session-scoped runtime keeps inbox isolated after later session start", { 
         receiver.sentMessages.some((entry) => entry.message.content?.includes("question-for-a")),
         false,
       );
+
+      // Lifecycle activity for either session cannot make shared, unscoped
+      // ExtensionAPI.sendMessage safe while both runtimes exist.
+      await receiver.emit("turn_start", ctxA);
+      const secondA = await sender.sendManual({ kind: "intercom-session", intercomSessionId: intercomSessionA }, {
+        text: "second-question-for-a",
+        expectsReply: true,
+      });
+      const sentB = await sender.sendManual({ kind: "intercom-session", intercomSessionId: parseSessionIdFromStatus(statusB) }, {
+        text: "question-for-b",
+        expectsReply: true,
+      });
+      assert.equal(secondA.delivered, true);
+      assert.equal(sentB.delivered, true);
+      await waitUntil(async () => {
+        const a = text(await receiver.tool("intercom").execute("pending-a-2", { action: "pending" }, new AbortController().signal, undefined, ctxA));
+        const b = text(await receiver.tool("intercom").execute("pending-b-2", { action: "pending" }, new AbortController().signal, undefined, ctxB));
+        return /second-question-for-a/.test(a) && /question-for-b/.test(b);
+      }, "both runtimes did not record suppressed asks");
+      assert.equal(receiver.sentMessages.some((entry) =>
+        entry.message.content?.includes("second-question-for-a") || entry.message.content?.includes("question-for-b")), false);
+
+      // Suppressed host deliveries must not leave hidden turn context. With two
+      // pending asks, reply without replyTo must remain ambiguous.
+      await receiver.emit("session_shutdown", ctxB);
+      await receiver.emit("turn_start", ctxA);
+      const ambiguousReply = await receiver.tool("intercom").execute("reply-after-suppression", {
+        action: "reply",
+        message: "must-not-guess",
+      }, new AbortController().signal, undefined, ctxA);
+      assert.equal(ambiguousReply.isError, true);
+      assert.match(text(ambiguousReply), /Multiple pending asks.*replyTo/s);
     } finally {
       await sender.disconnect().catch(() => undefined);
       await receiver.emit("session_shutdown", ctxA);
@@ -993,8 +1025,14 @@ test("reply uses identity-snapshot structured target", { concurrency: false }, a
         "ask message was not delivered to receiver",
       );
 
+      const deliveredPrompt = receiver.sentMessages.find((entry) => entry.message.content?.includes("question-for-reply-snapshot"));
+      const inboundId = (deliveredPrompt?.message.details as { message?: { id?: string } } | undefined)?.message?.id;
+      assert.ok(inboundId, "inbound message id missing");
+      assert.match(deliveredPrompt?.message.content ?? "", new RegExp(`replyTo: "${inboundId}"`));
+
       const replied = await receiver.tool("intercom").execute("reply-target", {
         action: "reply",
+        replyTo: inboundId,
         message: "reply-from-receiver",
       }, new AbortController().signal, undefined, receiverCtx);
       assert.equal(replied.isError, false);

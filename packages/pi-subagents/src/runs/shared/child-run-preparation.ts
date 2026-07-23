@@ -3,6 +3,17 @@ import {
 	applyThinkingSuffix,
 	buildPiArgs,
 	cleanupTempDir,
+	SUBAGENT_CHILD_AGENT_ENV,
+	SUBAGENT_CHILD_INDEX_ENV,
+	SUBAGENT_INTERCOM_SESSION_NAME_ENV,
+	SUBAGENT_ORCHESTRATOR_CWD_ENV,
+	SUBAGENT_ORCHESTRATOR_TARGET_ENV,
+	SUBAGENT_RUN_ID_ENV,
+	SUBAGENT_SUPERVISOR_ALIAS_ENV,
+	SUBAGENT_SUPERVISOR_CWD_ENV,
+	SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID_ENV,
+	SUBAGENT_SUPERVISOR_PI_SESSION_ID_ENV,
+	SUBAGENT_SUPERVISOR_WAIT_MODE_ENV,
 	type BuildPiArgsInput,
 	type BuildPiArgsResult,
 } from "./pi-args.ts";
@@ -81,6 +92,20 @@ export const defaultChildRunPreparationAdapter: ChildRunPreparationAdapter = {
 	cleanupTempDir,
 };
 
+const CHILD_ROUTING_ENV_KEYS = [
+	SUBAGENT_INTERCOM_SESSION_NAME_ENV,
+	SUBAGENT_ORCHESTRATOR_TARGET_ENV,
+	SUBAGENT_ORCHESTRATOR_CWD_ENV,
+	SUBAGENT_SUPERVISOR_INTERCOM_SESSION_ID_ENV,
+	SUBAGENT_SUPERVISOR_PI_SESSION_ID_ENV,
+	SUBAGENT_SUPERVISOR_ALIAS_ENV,
+	SUBAGENT_SUPERVISOR_CWD_ENV,
+	SUBAGENT_RUN_ID_ENV,
+	SUBAGENT_CHILD_AGENT_ENV,
+	SUBAGENT_CHILD_INDEX_ENV,
+	SUBAGENT_SUPERVISOR_WAIT_MODE_ENV,
+] as const;
+
 export function prepareChildRun(
 	request: ChildRunRequest,
 	adapter: ChildRunPreparationAdapter = defaultChildRunPreparationAdapter,
@@ -110,11 +135,16 @@ export function prepareChildRun(
 		childAgentName: request.identity.agentName,
 		childIndex: request.identity.childIndex,
 	});
+	const spawnEnv = { ...process.env };
+	for (const key of CHILD_ROUTING_ENV_KEYS) {
+		delete spawnEnv[key];
+	}
+	Object.assign(spawnEnv, built.env, adapter.getDepthEnv(request.context.maxSubagentDepth));
 	let cleaned = false;
 	return {
 		args: built.args,
 		env: built.env,
-		spawnEnv: { ...process.env, ...built.env, ...adapter.getDepthEnv(request.context.maxSubagentDepth) },
+		spawnEnv,
 		tempDir: built.tempDir,
 		model: applyThinkingSuffix(request.capabilities.model, request.capabilities.thinking),
 		identity: request.identity,
