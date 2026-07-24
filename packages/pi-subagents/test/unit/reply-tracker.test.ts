@@ -69,6 +69,35 @@ test("sole host-delivered ask remains eligible for bare reply", () => {
   assert.equal(resolved.message.id, "ask-a");
 });
 
+test("suppressed host delivery cancels queued implicit context without deleting pending ask", () => {
+  const tracker = new ReplyTracker();
+  const context = tracker.recordIncomingMessage(session("sender-a"), ask("ask-a"));
+  tracker.queueTurnContext(context);
+  tracker.cancelQueuedTurnContext("ask-a");
+  tracker.beginTurn();
+
+  assert.throws(
+    () => tracker.resolveReplyTarget({}),
+    /Cannot reply implicitly.*ask-a.*not delivered.*replyTo/s,
+  );
+  assert.equal(tracker.resolveReplyTarget({ replyTo: "ask-a" }).message.id, "ask-a");
+});
+
+test("back-to-back agent runs consume matching reply contexts without FIFO lag", () => {
+  const tracker = new ReplyTracker();
+  const first = tracker.recordIncomingMessage(session("sender-a"), ask("ask-a"));
+  tracker.queueTurnContext(first);
+  tracker.beginTurn();
+  assert.equal(tracker.resolveReplyTarget({}).message.id, "ask-a");
+  tracker.markReplied("ask-a");
+  tracker.endTurn();
+
+  const second = tracker.recordIncomingMessage(session("sender-b"), ask("ask-b"));
+  tracker.queueTurnContext(second);
+  tracker.beginTurn();
+  assert.equal(tracker.resolveReplyTarget({}).message.id, "ask-b");
+});
+
 test("replyTo resolves exact original inbound message", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(session("sender-a"), ask("ask-a"));

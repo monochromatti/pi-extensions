@@ -973,18 +973,13 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     }
     const senderDisplay = entry.from.alias || entry.from.id.slice(0, 8);
     const replyInstruction = entry.replyCommand ? `\n\nTo reply, use the intercom tool: ${entry.replyCommand}` : "";
-    const accepted = (pi.sendMessage as unknown as (message: unknown, options: unknown) => unknown)(
-      {
-        customType: "intercom_message",
-        content: `**📨 From ${senderDisplay}** (${entry.from.cwd})${replyInstruction}\n\n${entry.bodyText}`,
-        display: true,
-        details: entry,
-      },
-      delivery === "trigger"
-        ? { triggerTurn: true }
-        : { deliverAs: "followUp" }
-    );
-    if (accepted !== false && delivery !== "followUp") {
+    // ExtensionAPI.sendMessage() is fire-and-forget, but triggerTurn starts the
+    // agent lifecycle synchronously before sendMessage() returns. Queue first so
+    // agent_start consumes this message's context rather than the previous one.
+    // The private runtime adapter returns false when host delivery is suppressed;
+    // roll back only the implicit-turn association in that case. The pending ask
+    // remains available through `pending` and explicit replyTo.
+    if (delivery === "trigger") {
       replyTracker.queueTurnContext({
         from: entry.from,
         message: entry.message,
@@ -997,6 +992,28 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
           ...(entry.from.alias ? { alias: entry.from.alias } : {}),
         },
       });
+    }
+    let accepted: unknown;
+    try {
+      accepted = (pi.sendMessage as unknown as (message: unknown, options: unknown) => unknown)(
+        {
+          customType: "intercom_message",
+          content: `**📨 From ${senderDisplay}** (${entry.from.cwd})${replyInstruction}\n\n${entry.bodyText}`,
+          display: true,
+          details: entry,
+        },
+        delivery === "trigger"
+          ? { triggerTurn: true }
+          : { deliverAs: "followUp" }
+      );
+    } catch (error) {
+      if (delivery === "trigger") {
+        replyTracker.cancelQueuedTurnContext(entry.message.id);
+      }
+      throw error;
+    }
+    if (accepted === false && delivery === "trigger") {
+      replyTracker.cancelQueuedTurnContext(entry.message.id);
     }
   }
   function scheduleInboundFlush(delayMs = INBOUND_FLUSH_DELAY_MS): void {
@@ -1747,13 +1764,13 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     if (!getLiveContext()) {
       return;
     }
-    replyTracker.endTurn();
     scheduleInboundFlush(0);
   });
   pi.on("agent_start", () => {
     if (!getLiveContext()) {
       return;
     }
+    replyTracker.beginTurn();
     agentRunning = true;
     activeTools.clear();
     syncPresenceStatus();
@@ -1776,6 +1793,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
     if (!getLiveContext()) {
       return;
     }
+    replyTracker.endTurn();
     agentRunning = false;
     activeTools.clear();
     syncPresenceStatus();
@@ -1786,7 +1804,6 @@ export default function piIntercomExtension(pi: ExtensionAPI, options: SingleRun
       return;
     }
     currentSessionId = ctx.sessionManager.getSessionId();
-    replyTracker.beginTurn();
   });
   pi.on("model_select", (event, ctx) => {
     if (!getLiveContext(ctx)) {

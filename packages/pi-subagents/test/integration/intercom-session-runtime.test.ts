@@ -188,6 +188,7 @@ async function createIntercomHarness(sessionName = "runtime-host", options: {
   const handlers = new Map<string, EventHandler[]>();
   const sentMessages: Array<{ message: { content?: string; details?: unknown }; sendOptions?: unknown }> = [];
   const appendEntries: Array<{ type: string; payload: unknown }> = [];
+  let sendMessageHook: (() => void) | undefined;
 
   const eventSubscriptions = new Map<string, Set<(payload: unknown) => void>>();
 
@@ -218,6 +219,7 @@ async function createIntercomHarness(sessionName = "runtime-host", options: {
     },
     sendMessage(message: { content?: string; details?: unknown }, sendOptions?: unknown) {
       sentMessages.push({ message, sendOptions });
+      sendMessageHook?.();
       return undefined;
     },
     appendEntry(type: string, payload: unknown) {
@@ -249,7 +251,17 @@ async function createIntercomHarness(sessionName = "runtime-host", options: {
     }
   };
 
-  return { emit, emitEvent, tool, sentMessages, appendEntries, hostPi };
+  return {
+    emit,
+    emitEvent,
+    tool,
+    sentMessages,
+    appendEntries,
+    hostPi,
+    setSendMessageHook(hook: (() => void) | undefined) {
+      sendMessageHook = hook;
+    },
+  };
 }
 
 function parseSessionIdFromStatus(result: CapturedToolResult): string {
@@ -1049,6 +1061,71 @@ test("reply uses identity-snapshot structured target", { concurrency: false }, a
       assert.equal(captured?.reconnect, "same-pi-session-if-unique");
     } finally {
       IntercomClient.prototype.sendManual = originalSendManual;
+      await sender.emit("session_shutdown", senderCtx);
+      await receiver.emit("session_shutdown", receiverCtx);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+    }
+  });
+});
+
+test("synchronous trigger lifecycle keeps bare replies aligned across consecutive asks", { concurrency: false }, async () => {
+  await withBroker(async (homeDir) => {
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+
+    const sender = await createIntercomHarness("sender-alias");
+    const receiver = await createIntercomHarness("receiver-alias");
+    const senderCtx = createContext("pi-sender", { idle: true, cwd: "/repo/shared", hasUI: true });
+    const receiverCtx = createContext("pi-receiver", { idle: true, cwd: "/repo/shared", hasUI: true });
+
+    try {
+      await sender.emit("session_start", senderCtx);
+      await receiver.emit("session_start", receiverCtx);
+      receiver.setSendMessageHook(() => {
+        // Production ExtensionAPI.sendMessage(triggerTurn) starts these events
+        // synchronously before returning to the extension caller.
+        void receiver.emit("agent_start", receiverCtx);
+        void receiver.emit("turn_start", receiverCtx);
+      });
+
+      const runAsk = async (label: string) => {
+        const askPromise = sender.tool("intercom").execute(`ask-${label}`, {
+          action: "ask",
+          to: "receiver-alias",
+          message: `question-${label}`,
+        }, new AbortController().signal, undefined, senderCtx);
+
+        await waitUntil(
+          () => receiver.sentMessages.some((entry) => entry.message.content?.includes(`question-${label}`)),
+          `ask ${label} was not delivered`,
+        );
+        const prompt = receiver.sentMessages.find((entry) => entry.message.content?.includes(`question-${label}`));
+        const inboundId = (prompt?.message.details as { message?: { id?: string } } | undefined)?.message?.id;
+        assert.ok(inboundId, `ask ${label} missing inbound id`);
+
+        const reply = await receiver.tool("intercom").execute(`reply-${label}`, {
+          action: "reply",
+          message: `answer-${label}`,
+        }, new AbortController().signal, undefined, receiverCtx);
+        assert.equal(reply.isError, false);
+        assert.equal((reply.details as { replyTo?: unknown }).replyTo, inboundId);
+        assert.equal((await askPromise).isError, false);
+
+        await receiver.emit("turn_end", receiverCtx);
+        await receiver.emit("agent_end", receiverCtx);
+        return inboundId;
+      };
+
+      const firstId = await runAsk("first");
+      const secondId = await runAsk("second");
+      assert.notEqual(secondId, firstId);
+    } finally {
+      receiver.setSendMessageHook(undefined);
       await sender.emit("session_shutdown", senderCtx);
       await receiver.emit("session_shutdown", receiverCtx);
       if (previousHome === undefined) delete process.env.HOME;

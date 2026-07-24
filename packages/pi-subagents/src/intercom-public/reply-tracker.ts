@@ -55,6 +55,14 @@ export class ReplyTracker {
     }
   }
 
+  cancelQueuedTurnContext(messageId: string): void {
+    const index = this.pendingTurnContexts.findIndex((context) => context.message.id === messageId);
+    if (index !== -1) {
+      this.pendingTurnContexts.splice(index, 1);
+    }
+    this.hostDeliveredAsks.delete(messageId);
+  }
+
   beginTurn(now = Date.now()): void {
     this.pruneExpired(now);
     this.currentTurnContext = this.pendingTurnContexts.shift() ?? null;
