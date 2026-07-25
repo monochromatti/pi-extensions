@@ -16,7 +16,19 @@ export function isTreeMapNodeEntry(entry: RawEntry): boolean {
 	if (entry.type === "branch_summary") return true;
 	if (entry.type !== "message") return false;
 	const role = entry.message?.role;
-	return role === "user";
+	if (role === "user") return true;
+	if (role !== "assistant") return false;
+	const content = entry.message?.content;
+	if (typeof content === "string") return content.trim().length > 0;
+	return (content || []).some((part) => part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0);
+}
+
+function forcedNodeAllowed(entry: RawEntry, filterMode: FilterMode, labeled: boolean): boolean {
+	if (filterMode === "all") return true;
+	if (entry.type === "branch_summary") return true;
+	if (entry.type !== "message") return false;
+	if (filterMode === "user-only") return entry.message?.role === "user";
+	return labeled;
 }
 
 function nearestRelevantSelfOrAncestor(
@@ -108,12 +120,24 @@ export function analyzeTreeMapSnapshot(snapshot: Snapshot, filterMode: FilterMod
 	}
 
 	const rawRoots = entries.filter((entry) => !parentRaw.get(entry.id)).map((entry) => entry.id);
-	const currentLeaf = snapshot.currentLeafId
-		? nearestRelevantSelfOrAncestor(snapshot.currentLeafId, rawParentById, relevantIds) || undefined
-		: undefined;
+	let currentLeaf: string | undefined;
+	if (snapshot.currentLeafId) {
+		let candidate: string | null = nearestRelevantSelfOrAncestor(snapshot.currentLeafId, rawParentById, relevantIds);
+		while (candidate) {
+			const entry = byId.get(candidate);
+			if (entry && isTreeMapNodeEntry(entry) && forcedNodeAllowed(entry, filterMode, !!snapshot.labelById[candidate])) {
+				currentLeaf = candidate;
+				break;
+			}
+			candidate = parentRaw.get(candidate) ?? null;
+		}
+	}
 
 	const visible = new Set<string>();
-	for (const root of rawRoots) visible.add(root);
+	for (const root of rawRoots) {
+		const entry = byId.get(root);
+		if (entry && forcedNodeAllowed(entry, filterMode, !!snapshot.labelById[root])) visible.add(root);
+	}
 	if (currentLeaf) visible.add(currentLeaf);
 
 	if (filterMode === "all") {

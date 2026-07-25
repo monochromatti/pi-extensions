@@ -7,6 +7,8 @@ export const FILTER_MODES = ["all", "user-only", "labeled-only"] as const satisf
 
 export const NODE_W_DEFAULT = 1;
 export const NODE_H = 1;
+export const USER_NODE_W = 2;
+export const USER_NODE_H = 2;
 export const COL_GAP = 3;
 export const ROW_GAP = 1;
 

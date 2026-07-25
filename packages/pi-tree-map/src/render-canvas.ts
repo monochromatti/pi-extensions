@@ -139,7 +139,9 @@ function drawEdgeGroup(canvas: string[][], parent: MapNode, children: MapNode[])
 }
 
 function drawNode(canvas: string[][], node: MapNode): void {
-	put(canvas, node.x, node.y, "■");
+	for (let y = node.y; y < node.y + node.h; y++) {
+		for (let x = node.x; x < node.x + node.w; x++) put(canvas, x, y, "■");
+	}
 }
 
 const RESET_STYLE = "\x1b[0m";

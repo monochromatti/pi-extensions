@@ -8,7 +8,7 @@ export interface RawEntry {
 	timestamp?: string;
 	message?: {
 		role?: string;
-		content?: Array<{ type?: string; text?: string }>;
+		content?: string | Array<{ type?: string; text?: string }>;
 		usage?: { totalTokens?: number };
 	};
 	summary?: string;

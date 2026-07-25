@@ -14,10 +14,11 @@ export function formatLocalTime(timestamp?: string): string {
 
 export function getUserSnippet(entry: RawEntry): string | undefined {
 	if (entry.type !== "message" || entry.message?.role !== "user") return undefined;
-	const text = (entry.message.content || [])
+	const content = entry.message.content;
+	const text = (typeof content === "string" ? content : (content || [])
 		.filter((p) => p.type === "text" && typeof p.text === "string")
 		.map((p) => p.text || "")
-		.join("\n")
+		.join("\n"))
 		.trim();
 	if (!text) return undefined;
 	return compactWhitespace(text);

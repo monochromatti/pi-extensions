@@ -1,4 +1,4 @@
-import { COL_GAP, NODE_H, NODE_W_DEFAULT, ROW_GAP } from "./constants.js";
+import { COL_GAP, NODE_H, NODE_W_DEFAULT, ROW_GAP, USER_NODE_H, USER_NODE_W } from "./constants.js";
 import type { TreeMapModel } from "./model.js";
 
 function getNodeWidth(_viewportWidth: number): number {
@@ -11,8 +11,13 @@ export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapM
 	const nodes = model.nodes.map((node) => ({ ...node }));
 	const nodeById = new Map(nodes.map((node) => [node.nodeId, node]));
 	const nodeW = getNodeWidth(viewportWidth);
-	const xStep = nodeW + COL_GAP;
-	const yStep = NODE_H + ROW_GAP;
+	for (const node of nodes) {
+		node.w = node.messageRole === "user" ? USER_NODE_W : nodeW;
+		node.h = node.messageRole === "user" ? USER_NODE_H : NODE_H;
+	}
+	// Reserve tallest node height for every leaf row. This keeps disjoint
+	// subtrees collision-free without post-layout shifts that bend connectors.
+	const rowStep = Math.max(...nodes.map((node) => node.h)) + ROW_GAP;
 
 	const childrenById = new Map<string, string[]>();
 	for (const node of nodes) childrenById.set(node.nodeId, node.childNodeIds);
@@ -21,9 +26,6 @@ export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapM
 		const node = nodeById.get(id);
 		if (!node) return;
 		node.depth = depth;
-		node.x = depth * xStep;
-		node.w = nodeW;
-		node.h = NODE_H;
 		for (const childId of childrenById.get(id) || []) assignDepth(childId, depth + 1);
 	};
 
@@ -34,12 +36,18 @@ export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapM
 		const children = childrenById.get(id) || [];
 		if (children.length === 0) {
 			node.y = cursorY;
-			cursorY += yStep;
+			cursorY += rowStep;
 			return node.y;
 		}
 
 		const ys = children.map((childId) => assignY(childId));
-		node.y = Math.round((Math.min(...ys) + Math.max(...ys)) / 2);
+		// Center parent connector on child boxes, not their top edges. This keeps
+		// mixed-height user/assistant nodes visually aligned.
+		const childCenters = children.map((childId) => {
+			const child = nodeById.get(childId);
+			return child ? child.y + Math.floor(child.h / 2) : 0;
+		});
+		node.y = Math.round((Math.min(...childCenters) + Math.max(...childCenters)) / 2) - Math.floor(node.h / 2);
 		return node.y;
 	};
 
@@ -53,21 +61,21 @@ export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapM
 		assignY(rootId);
 	}
 
-	// Simple collision pass per depth column
-	const byDepth = new Map<number, typeof nodes>();
-	for (const n of nodes) {
-		if (!byDepth.has(n.depth)) byDepth.set(n.depth, []);
-		byDepth.get(n.depth)!.push(n);
+	const minY = Math.min(...nodes.map((node) => node.y));
+	if (minY < 0) {
+		for (const node of nodes) node.y -= minY;
 	}
-	for (const [, col] of byDepth) {
-		col.sort((a, b) => a.y - b.y);
-		for (let i = 1; i < col.length; i++) {
-			const prev = col[i - 1];
-			const cur = col[i];
-			const minY = prev.y + yStep;
-			if (cur.y < minY) cur.y = minY;
-		}
+
+	const columnWidths = new Map<number, number>();
+	for (const node of nodes) columnWidths.set(node.depth, Math.max(columnWidths.get(node.depth) || 0, node.w));
+	const columnX = new Map<number, number>();
+	let x = 0;
+	for (let depth = 0; depth <= nodes.length; depth++) {
+		if (!columnWidths.has(depth)) continue;
+		columnX.set(depth, x);
+		x += columnWidths.get(depth)! + COL_GAP;
 	}
+	for (const node of nodes) node.x = columnX.get(node.depth) || 0;
 
 	return { ...model, nodes };
 }

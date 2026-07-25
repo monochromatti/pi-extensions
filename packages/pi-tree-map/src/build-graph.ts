@@ -49,10 +49,11 @@ function nearestStructuralAncestor(id: string, parentById: Map<string, string | 
 
 function extractMessageDetails(entry: RawEntry): { text?: string; role?: string } {
 	if (entry.type !== "message") return {};
-	const text = (entry.message?.content || [])
+	const content = entry.message?.content;
+	const text = (typeof content === "string" ? content : (content || [])
 		.filter((part) => part.type === "text" && typeof part.text === "string")
 		.map((part) => part.text || "")
-		.join("\n")
+		.join("\n"))
 		.trim();
 	return { text: text || undefined, role: entry.message?.role };
 }
@@ -67,7 +68,10 @@ function extractNodeMessage(entry: RawEntry): { text?: string; role?: string } {
 
 function isMessageLike(entry: RawEntry): boolean {
 	if (entry.type === "branch_summary") return true;
-	return entry.type === "message";
+	if (entry.type !== "message") return false;
+	const role = entry.message?.role;
+	if (role !== "user" && role !== "assistant") return false;
+	return !!extractMessageDetails(entry).text;
 }
 
 function findAdjacentMessages(entries: RawEntry[], index: number, direction: -1 | 1, limit: number): Array<{ text?: string; role?: string }> {
