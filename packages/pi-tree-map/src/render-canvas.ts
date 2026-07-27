@@ -139,8 +139,9 @@ function drawEdgeGroup(canvas: string[][], parent: MapNode, children: MapNode[])
 }
 
 function drawNode(canvas: string[][], node: MapNode): void {
+	const symbol = node.messageRole === "user" ? "●" : "■";
 	for (let y = node.y; y < node.y + node.h; y++) {
-		for (let x = node.x; x < node.x + node.w; x++) put(canvas, x, y, "■");
+		for (let x = node.x; x < node.x + node.w; x++) put(canvas, x, y, symbol);
 	}
 }
 

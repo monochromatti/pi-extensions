@@ -1,4 +1,4 @@
-import { COL_GAP, NODE_H, NODE_W_DEFAULT, ROW_GAP, USER_NODE_H, USER_NODE_W } from "./constants.js";
+import { COL_GAP, NODE_H, NODE_W_DEFAULT, ROW_GAP } from "./constants.js";
 import type { TreeMapModel } from "./model.js";
 
 function getNodeWidth(_viewportWidth: number): number {
@@ -12,8 +12,8 @@ export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapM
 	const nodeById = new Map(nodes.map((node) => [node.nodeId, node]));
 	const nodeW = getNodeWidth(viewportWidth);
 	for (const node of nodes) {
-		node.w = node.messageRole === "user" ? USER_NODE_W : nodeW;
-		node.h = node.messageRole === "user" ? USER_NODE_H : NODE_H;
+		node.w = nodeW;
+		node.h = NODE_H;
 	}
 	// Reserve tallest node height for every leaf row. This keeps disjoint
 	// subtrees collision-free without post-layout shifts that bend connectors.
@@ -41,8 +41,7 @@ export function layoutTree(model: TreeMapModel, viewportWidth: number): TreeMapM
 		}
 
 		const ys = children.map((childId) => assignY(childId));
-		// Center parent connector on child boxes, not their top edges. This keeps
-		// mixed-height user/assistant nodes visually aligned.
+		// Center parent connector on child boxes, not their top edges.
 		const childCenters = children.map((childId) => {
 			const child = nodeById.get(childId);
 			return child ? child.y + Math.floor(child.h / 2) : 0;

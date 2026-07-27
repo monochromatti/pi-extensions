@@ -2,7 +2,7 @@
 
 Pi extension that adds `/map`: an interactive terminal tree-map view of the current session graph.
 
-Nodes are compact squares: larger squares mark user messages, smaller squares mark assistant replies that contain visible text. Branch summaries are also shown as navigable nodes. Tool calls, tool results, and thinking-only steps stay out of map nodes. Details show in modal below map.
+Nodes use compact shapes: dots mark user messages, squares mark assistant replies that contain visible text. Branch summaries are also shown as navigable nodes. Tool calls, tool results, and thinking-only steps stay out of map nodes. Details show in modal below map.
 
 ## Load
 
