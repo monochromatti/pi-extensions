@@ -35,8 +35,8 @@ Quick showcase entrypoint: `/canvas-demo`.
 `/canvas-demo` behavior:
 
 - does everything `/canvas open` does
-- renders a starter showcase into `#status`, `#root`, and `#sidebar`
-- includes markdown, Mermaid, diff code block, and interactive feedback controls
+- renders a compact showcase into `#status`, `#root`, and `#sidebar`
+- includes a comparison table, Mermaid sequence diagram, diff code block, and one decision control
 
 ## Tool surface
 
@@ -55,6 +55,8 @@ The canvas owns all visual design so agents never have to: bare semantic HTML (h
 Agents add layout intent only through a closed helper-class vocabulary: `card`, `callout`, `warning`, `success`, `danger`, `info`, `grid`, `stack`, `row`, `toolbar`, `field`, `muted`, `badge`, `btn-primary`, `btn-quiet`. Unknown classes and other design mistakes come back as `warnings` in the `canvas_render` result (see `src/lint.ts`): stripped inline styles, prose outside `<markdown-block>`, controls without `data-signal`, buttons without `data-event`, overlong `#status` lines, repeated appends to `#root`.
 
 The linter also catches repetitive card chrome, long action labels, skipped heading levels, and large root documents without named patch slots. Cards are reserved for bounded hierarchy; plain document sections are the default.
+
+Reading-load rules push agents toward compression instead of prose: paragraphs over ~450 characters, renders over ~1200 characters with no table/list/diagram/code, renders over ~5000 characters, feedback-style inputs, and three or more freeform text boxes all return warnings. Reading load counts prose only — code blocks, diagram source, table rows, and collapsed `<details>` are excluded, so structure is never penalized.
 
 Checkpoint buttons (`data-event="checkpoint:..."`) automatically render as the filled primary action; attention buttons as accent outlines.
 
@@ -80,6 +82,20 @@ Render modes:
 - `<code-block language="ts">...` with copy button
 - `<code-block language="diff">...` for unified diff markers
 - `<mermaid-diagram>...</mermaid-diagram>` with pinned loader path and safe fallback
+
+## Selection comments
+
+Users select any text in `#root` or `#sidebar`; a comment pill appears, and the note plus the quoted passage arrive as an attention event:
+
+```text
+Canvas comment [design] on "Refresh happens on the first 401.": Second 401 should bail.
+```
+
+Comments post to a dedicated `POST /comment` route rather than the generic attention endpoint. The server validates and normalizes the fields, assigns the index, appends to the session log, and marks the event `source: "selection-comment"` — a marker agent-rendered buttons cannot forge, so a render cannot inject text into the transcript as if the user wrote it.
+
+The log lives in the signal store under `comments` (`{ index, slot, quote, note, at }`) and is server-owned: `/sync` cannot overwrite it, so reloads, extra tabs, and racing signal posts never drop history. Commented passages stay highlighted via the CSS Custom Highlight API (most recent 50). A selection spanning two slots reports no slot rather than guessing. The comment layer lives outside `#root`/`#sidebar`, so agent patches never destroy an in-progress comment, and `#canvas-comment-layer` is rejected as a render selector.
+
+Because freeform review is built in, agents should not render generic feedback textareas; `src/lint.ts` warns when they do.
 
 ## Events
 
@@ -147,7 +163,7 @@ High-level acceptance flow:
 5. ask agent for spec planning help
 6. agent renders scaffold into canvas
 7. agent streams sections, Mermaid diagram, and diff block
-8. user submits section feedback in canvas
+8. user selects text and submits section feedback as a canvas comment
 9. explicit feedback appears as concise chat/transcript summary
 10. agent revises section with targeted render update
 11. user asks: create `SPEC.md` from feedback
@@ -155,14 +171,17 @@ High-level acceptance flow:
 
 ## Helper snippets
 
-Section feedback snippet:
+Decision snippet (controls exist for open decisions; freeform notes come from selection comments):
 
 ```html
-<section id="canvas-scope" data-canvas-slot="scope">
-  <h3>Scope</h3>
-  <textarea data-signal="feedback.section.scope"></textarea>
-  <button data-event="attention:revise_scope">Revise this section</button>
-  <button data-event="checkpoint:approve_scope" data-payload='{"source":"button"}'>Approve</button>
+<section id="canvas-decision" data-canvas-slot="decision">
+  <h3>Open decision</h3>
+  <fieldset>
+    <legend>Storage backend</legend>
+    <label><input type="radio" name="backend" value="sqlite" data-signal="choice.backend" /> SQLite</label>
+    <label><input type="radio" name="backend" value="postgres" data-signal="choice.backend" /> Postgres</label>
+  </fieldset>
+  <button data-event="checkpoint:pick_backend" data-enable-when="choice.backend">Confirm choice</button>
 </section>
 ```
 

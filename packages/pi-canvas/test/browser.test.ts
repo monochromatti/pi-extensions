@@ -430,3 +430,181 @@ test("5.10 data-show and data-enable-when react to signal edits without expressi
 	assert.equal(nudge.hidden, false);
 	assert.equal(send.disabled, true);
 });
+
+test("10.1 selecting rendered text produces a comment with quote, slot, and note", async (t) => {
+	const session = createCanvasSession();
+	const attention: Array<{ name: string; payload?: unknown }> = [];
+	const runtime = await startCanvasServer(session, {
+		attentionPolicy: {
+			onAttention: (_summary, _options, event) => {
+				if (event) attention.push({ name: event.name, payload: event.payload });
+			},
+		},
+	});
+
+	const dom = await JSDOM.fromURL(runtime.url, {
+		runScripts: "dangerously",
+		resources: "usable",
+		pretendToBeVisual: true,
+	});
+
+	t.after(async () => {
+		dom.window.close();
+		await runtime.stop();
+	});
+
+	const rendered = renderToCanvas(session, {
+		selector: "#root",
+		html: '<section data-canvas-slot="design"><p id="claim">Refresh happens on the first 401.</p></section>',
+	});
+	assert.equal(rendered.ok, true);
+
+	await waitFor(() => Boolean(dom.window.document.querySelector("#claim")));
+
+	const claim = dom.window.document.querySelector("#claim")!;
+	const range = dom.window.document.createRange();
+	range.selectNodeContents(claim);
+	const selection = dom.window.getSelection()!;
+	selection.removeAllRanges();
+	selection.addRange(range);
+	dom.window.document.dispatchEvent(new dom.window.Event("mouseup", { bubbles: true }));
+
+	await waitFor(() => {
+		const pill = dom.window.document.querySelector(".canvas-comment-pill") as HTMLElement | null;
+		return Boolean(pill) && pill!.hidden === false;
+	});
+
+	(dom.window.document.querySelector(".canvas-comment-pill") as HTMLElement).click();
+	await waitFor(() => Boolean(dom.window.document.querySelector(".canvas-comment-composer")));
+
+	const composer = dom.window.document.querySelector(".canvas-comment-composer") as HTMLElement;
+	assert.equal(composer.hidden, false);
+	assert.match(composer.querySelector(".canvas-comment-quote")?.textContent ?? "", /Refresh happens on the first 401/);
+
+	const input = composer.querySelector(".canvas-comment-input") as HTMLTextAreaElement;
+	input.value = "Second 401 should bail, say so here.";
+	(composer.querySelector(".canvas-comment-send") as HTMLButtonElement).click();
+
+	await waitFor(() => attention.length > 0);
+	assert.equal(attention[0]?.name, "comment");
+	assert.deepEqual(
+		{ ...(attention[0]?.payload as Record<string, unknown>), at: undefined },
+		{
+			kind: "selection-comment",
+			index: 1,
+			slot: "design",
+			quote: "Refresh happens on the first 401.",
+			note: "Second 401 should bail, say so here.",
+			at: undefined,
+		},
+	);
+
+	// The comment is also readable as a signal, so the agent can catch up later.
+	const comments = session.signals.comments as Array<{ note: string }>;
+	assert.equal(comments.length, 1);
+	assert.equal(comments[0]?.note, "Second 401 should bail, say so here.");
+
+	// The composer closes after sending and never lives inside a patchable slot.
+	assert.equal((dom.window.document.querySelector(".canvas-comment-composer") as HTMLElement).hidden, true);
+	assert.equal(dom.window.document.querySelector("#root .canvas-comment-composer"), null);
+});
+
+test("10.1 selections in form controls do not show comment pill", async (t) => {
+	const session = createCanvasSession();
+	const runtime = await startCanvasServer(session);
+	const dom = await JSDOM.fromURL(runtime.url, {
+		runScripts: "dangerously",
+		resources: "usable",
+		pretendToBeVisual: true,
+	});
+
+	t.after(async () => {
+		dom.window.close();
+		await runtime.stop();
+	});
+
+	assert.equal(renderToCanvas(session, { selector: "#root", html: '<textarea id="notes">editable agent text</textarea>' }).ok, true);
+	await waitFor(() => Boolean(dom.window.document.querySelector("#notes")));
+	const notes = dom.window.document.querySelector("#notes")!;
+	const range = dom.window.document.createRange();
+	range.selectNodeContents(notes);
+	const selection = dom.window.getSelection()!;
+	selection.removeAllRanges();
+	selection.addRange(range);
+	dom.window.document.dispatchEvent(new dom.window.Event("mouseup", { bubbles: true }));
+	await new Promise((resolve) => dom.window.setTimeout(resolve, 20));
+
+	assert.equal(dom.window.document.querySelector(".canvas-comment-pill"), null);
+});
+
+test("10.1 Escape dismisses visible comment pill without opening composer", async (t) => {
+	const session = createCanvasSession();
+	const runtime = await startCanvasServer(session);
+	const dom = await JSDOM.fromURL(runtime.url, {
+		runScripts: "dangerously",
+		resources: "usable",
+		pretendToBeVisual: true,
+	});
+
+	t.after(async () => {
+		dom.window.close();
+		await runtime.stop();
+	});
+
+	assert.equal(renderToCanvas(session, { selector: "#root", html: '<p id="claim">Selectable rendered text</p>' }).ok, true);
+	await waitFor(() => Boolean(dom.window.document.querySelector("#claim")));
+	const range = dom.window.document.createRange();
+	range.selectNodeContents(dom.window.document.querySelector("#claim")!);
+	const selection = dom.window.getSelection()!;
+	selection.removeAllRanges();
+	selection.addRange(range);
+	dom.window.document.dispatchEvent(new dom.window.Event("mouseup", { bubbles: true }));
+	await waitFor(() => (dom.window.document.querySelector(".canvas-comment-pill") as HTMLElement | null)?.hidden === false);
+
+	dom.window.document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+	assert.equal((dom.window.document.querySelector(".canvas-comment-pill") as HTMLElement).hidden, true);
+	assert.equal((dom.window.document.querySelector(".canvas-comment-composer") as HTMLElement).hidden, true);
+});
+
+test("10.9 a patch that replaces the quoted text dismisses the open composer", async (t) => {
+	const session = createCanvasSession();
+	const runtime = await startCanvasServer(session);
+
+	const dom = await JSDOM.fromURL(runtime.url, {
+		runScripts: "dangerously",
+		resources: "usable",
+		pretendToBeVisual: true,
+	});
+
+	t.after(async () => {
+		dom.window.close();
+		await runtime.stop();
+	});
+
+	renderToCanvas(session, {
+		selector: "#root",
+		html: '<section id="canvas-claim" data-canvas-slot="claim"><p id="claim">Refresh happens on the first 401.</p></section>',
+	});
+	await waitFor(() => Boolean(dom.window.document.querySelector("#claim")));
+
+	const range = dom.window.document.createRange();
+	range.selectNodeContents(dom.window.document.querySelector("#claim")!);
+	const selection = dom.window.getSelection()!;
+	selection.removeAllRanges();
+	selection.addRange(range);
+	dom.window.document.dispatchEvent(new dom.window.Event("mouseup", { bubbles: true }));
+
+	await waitFor(() => (dom.window.document.querySelector(".canvas-comment-pill") as HTMLElement | null)?.hidden === false);
+	(dom.window.document.querySelector(".canvas-comment-pill") as HTMLElement).click();
+	await waitFor(() => (dom.window.document.querySelector(".canvas-comment-composer") as HTMLElement | null)?.hidden === false);
+
+	renderToCanvas(session, {
+		selector: "#canvas-claim",
+		html: '<p id="claim-2">Refresh happens on every 401.</p>',
+		mode: "inner",
+	});
+
+	await waitFor(() => Boolean(dom.window.document.querySelector("#claim-2")));
+	await waitFor(() => (dom.window.document.querySelector(".canvas-comment-composer") as HTMLElement).hidden === true);
+	assert.match(dom.window.document.querySelector(".canvas-comment-toast")?.textContent ?? "", /selection changed/i);
+});

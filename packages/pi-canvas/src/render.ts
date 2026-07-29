@@ -42,6 +42,8 @@ export type RenderResult =
 	  };
 
 const BUILTIN_SELECTORS = new Set(["#root", "#status", "#sidebar"]);
+// Client-owned UI (selection comments) must survive every agent render.
+const RESERVED_SELECTORS = new Set(["#canvas-comment-layer"]);
 
 export function createRenderRuntime(): CanvasRenderRuntime {
 	return {
@@ -131,6 +133,7 @@ function pushPatch(session: CanvasSessionState, patchInput: Omit<CanvasPatch, "i
 }
 
 function isAllowedSelector(session: CanvasSessionState, selector: string): boolean {
+	if (RESERVED_SELECTORS.has(selector)) return false;
 	if (BUILTIN_SELECTORS.has(selector)) return true;
 	if (/^#canvas-[a-z0-9_-]+$/i.test(selector)) return true;
 	if (selector === "[data-canvas-slot]") return true;

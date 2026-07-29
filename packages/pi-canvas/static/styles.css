@@ -767,6 +767,81 @@ markdown-block {
 	font-size: 0.85rem;
 }
 
+/* ----------------------------------------------------- selection comments */
+
+/* The layer lives outside #root/#sidebar so agent patches never destroy an
+ * in-progress comment; positioning is set by client.js from the selection rect. */
+#canvas-comment-layer {
+	position: absolute;
+	inset: 0 0 auto 0;
+	height: 0;
+	z-index: 40;
+	pointer-events: none;
+}
+
+.canvas-comment-pill,
+.canvas-comment-composer,
+.canvas-comment-toast {
+	position: absolute;
+	top: 0;
+	left: 0;
+	pointer-events: auto;
+}
+
+.canvas-comment-pill {
+	font-size: 0.7rem;
+	padding: 0.25em 0.8em;
+	background: var(--accent);
+	border-color: var(--accent);
+	color: var(--on-accent);
+	box-shadow: var(--shadow);
+}
+
+.canvas-comment-composer {
+	width: min(24rem, calc(100vw - 2rem));
+	padding: 0.75rem 0.85rem;
+	background: var(--paper-raised);
+	border: 1px solid var(--line-strong);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow);
+}
+
+.canvas-comment-quote {
+	margin: 0 0 0.6rem;
+	max-height: 5.5rem;
+	overflow: auto;
+	font-size: 0.85rem;
+}
+
+.canvas-comment-input {
+	min-height: 4.5rem;
+}
+
+.canvas-comment-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 0.5rem;
+	margin-top: 0.6rem;
+}
+
+.canvas-comment-toast {
+	margin: 0;
+	padding: 0.35rem 0.7rem;
+	font-family: var(--font-mono);
+	font-size: 0.7rem;
+	color: var(--ink-soft);
+	background: var(--paper-raised);
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	box-shadow: var(--shadow);
+	white-space: nowrap;
+}
+
+::highlight(canvas-comment) {
+	background: color-mix(in oklab, var(--warning) 32%, transparent);
+	text-decoration: underline dotted color-mix(in oklab, var(--warning) 70%, var(--ink));
+}
+
 /* ---------------------------------------------------------------- motion */
 
 @keyframes canvas-enter {

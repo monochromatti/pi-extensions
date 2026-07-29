@@ -10,10 +10,13 @@ test("9.1 clean recipe-shaped html produces no warnings", () => {
 		html: `<section class="card" id="canvas-scope" data-canvas-slot="scope">
 			<h3>Scope <span class="badge warning">draft</span></h3>
 			<markdown-block>**In**: auth. **Out**: SSO.</markdown-block>
-			<label class="field">Notes<textarea data-signal="feedback.section.scope"></textarea></label>
+			<fieldset>
+				<legend>Cutover</legend>
+				<label><input type="radio" name="cutover" value="now" data-signal="choice.cutover" /> Now</label>
+				<label><input type="radio" name="cutover" value="staged" data-signal="choice.cutover" /> Staged</label>
+			</fieldset>
 			<div class="toolbar">
-				<button data-event="attention:revise_scope" data-enable-when="feedback.section.scope">Revise</button>
-				<button data-event="checkpoint:approve_scope">Approve</button>
+				<button data-event="checkpoint:approve_scope" data-enable-when="choice.cutover">Approve</button>
 			</div>
 		</section>`,
 	});
@@ -134,4 +137,57 @@ test("9.11 large root documents without slots are flagged", () => {
 		),
 		false,
 	);
+});
+
+test("9.12 walls of text are flagged unless the render carries visual structure", () => {
+	const prose = `<markdown-block>${"The migration proceeds in stages and each stage is described here. ".repeat(24)}</markdown-block>`;
+	assert.equal(
+		lintCanvasHtml({ selector: "#root", html: prose }).some((warning) => /unbroken prose/.test(warning)),
+		true,
+	);
+
+	const compact = `<markdown-block>| Stage | Risk |
+| --- | --- |
+${"| extract loader | low |\n".repeat(24)}</markdown-block>`;
+	assert.equal(
+		lintCanvasHtml({ selector: "#root", html: compact }).some((warning) => /unbroken prose/.test(warning)),
+		false,
+	);
+});
+
+test("9.13 dense paragraphs are flagged, structured markdown is not", () => {
+	const dense = `<markdown-block>${"Refresh happens on the first 401 and retries once. ".repeat(12)}</markdown-block>`;
+	assert.equal(
+		lintCanvasHtml({ selector: "#root", html: dense }).some((warning) => /Paragraph starting/.test(warning)),
+		true,
+	);
+
+	const bullets = `<markdown-block>${"- refresh on the first 401 and retry exactly once\n".repeat(12)}</markdown-block>`;
+	assert.equal(
+		lintCanvasHtml({ selector: "#root", html: bullets }).some((warning) => /Paragraph starting/.test(warning)),
+		false,
+	);
+});
+
+test("9.14 generic feedback boxes and stacked comment fields are flagged", () => {
+	const generic = lintCanvasHtml({
+		selector: "#sidebar",
+		html: `<label class="field">Notes<textarea data-signal="feedback.global"></textarea></label>
+			<div class="toolbar"><button data-event="attention:revise">Revise</button></div>`,
+	});
+	assert.equal(generic.some((warning) => /selection comments/i.test(warning)), true);
+
+	const stacked = lintCanvasHtml({
+		selector: "#root",
+		html: `<textarea data-signal="review.a"></textarea><textarea data-signal="review.b"></textarea><textarea data-signal="review.c"></textarea>`,
+	});
+	assert.equal(stacked.some((warning) => /freeform text boxes/.test(warning)), true);
+
+	// A control bound to a real decision stays clean.
+	const decision = lintCanvasHtml({
+		selector: "#sidebar",
+		html: `<label class="field">Rollout window<input data-signal="choice.window" /></label>
+			<div class="toolbar"><button data-event="checkpoint:pick_window">Confirm</button></div>`,
+	});
+	assert.deepEqual(decision, []);
 });

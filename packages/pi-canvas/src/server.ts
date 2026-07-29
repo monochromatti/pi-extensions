@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildCanvasCsp } from "./assets.ts";
+import { appendComment, buildSelectionComment } from "./comments.ts";
 import {
 	pushAttentionEvent,
 	pushCheckpointEvent,
@@ -209,6 +210,47 @@ async function handleRequest(
 		return;
 	}
 
+	if (method === "POST" && parsed.pathname === "/comment") {
+		if (!isAllowedMutationOrigin(req)) {
+			respondForbiddenOrigin(res);
+			return;
+		}
+
+		if (!isAuthorized(req, parsed, session.token)) {
+			respondUnauthorized(res);
+			return;
+		}
+
+		const body = await readJsonBody(req);
+		const comment = buildSelectionComment(session, body);
+		if (!comment) {
+			respondJson(res, csp, { ok: false, error: "invalid_comment" }, 400);
+			return;
+		}
+
+		const comments = appendComment(session, comment);
+		let event;
+		let delivered = true;
+		try {
+			event = await pushAttentionEvent(
+				session,
+				{
+					name: "comment",
+					payload: comment,
+					signals: { ...session.signals },
+					source: "selection-comment",
+				},
+				options?.attentionPolicy,
+			);
+		} catch {
+			// Log comment even when host delivery fails; agent can recover from signals.
+			delivered = false;
+		}
+
+		respondJson(res, csp, { ok: true, comment, comments, delivered, ...(event ? { event } : {}) });
+		return;
+	}
+
 	const checkpointName = readEventName(parsed.pathname, "/event/checkpoint/");
 	if (method === "POST" && checkpointName) {
 		if (!isAllowedMutationOrigin(req)) {
@@ -260,6 +302,7 @@ async function handleRequest(
 				name: attentionName,
 				payload: extractPayload(body),
 				signals: { ...session.signals },
+				source: "control",
 			},
 			options?.attentionPolicy,
 		);
@@ -299,8 +342,8 @@ function respondForbiddenOrigin(res: ServerResponse): void {
 	res.end(JSON.stringify({ ok: false, error: "forbidden_origin" }));
 }
 
-function respondJson(res: ServerResponse, csp: string, payload: unknown): void {
-	res.statusCode = 200;
+function respondJson(res: ServerResponse, csp: string, payload: unknown, status = 200): void {
+	res.statusCode = status;
 	res.setHeader("content-type", "application/json; charset=utf-8");
 	res.setHeader("cache-control", "no-store");
 	res.setHeader("x-content-type-options", "nosniff");

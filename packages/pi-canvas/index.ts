@@ -76,11 +76,13 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 			"Use <markdown-block> for prose, <code-block language=\"ts|diff|...\"> for code, <mermaid-diagram> for diagrams. " +
 			"Collect user input with data-signal attributes and buttons like data-event=\"attention:name\" or data-event=\"checkpoint:name\"; " +
 			"data-show=\"<signal key>\" and data-enable-when=\"<signal key>\" toggle visibility/enablement from signals. " +
+			"Users can select any rendered text and comment on it, so render controls only for real decisions. " +
 			"The result lists declared slots and may include design-lint warnings: fix them in your next render.",
-		promptSnippet: "canvas_render(selector, html, mode) - render UI into canvas after /canvas on",
+		promptSnippet: "canvas_render(selector, html, mode) - render compact visual UI into canvas after /canvas on",
 		promptGuidelines: [
+			"Canvas: compress information — tables, diagrams, diffs, badges, short bullets. Prose paragraphs are the last resort, not the default.",
+			"Canvas: freeform feedback is built in (users select text and comment). Render inputs only for open decisions the user must settle; skip generic feedback panels.",
 			"Canvas: patch the smallest slot that changed; never replace an element containing input the user may be typing into.",
-			"Canvas: prefer <markdown-block> for prose over hand-written HTML; summarize important canvas feedback into chat before final output.",
 			"Canvas: semantic HTML is auto-styled; use only documented helper classes (inline styles are stripped) and fix any warnings canvas_render returns.",
 		],
 		parameters: {
@@ -194,7 +196,7 @@ export default function registerCanvasExtension(pi: ExtensionAPI, deps: CanvasCo
 			renderCanvasDemo(session);
 			reportCanvasInfo(
 				ctx,
-				"Canvas demo rendered: try typing feedback and clicking the attention/checkpoint buttons in the sidebar.",
+				"Canvas demo rendered: select any text to comment on it, or pick a strategy and confirm in the sidebar.",
 			);
 
 			return ready;
@@ -363,77 +365,52 @@ function disabledToolResult() {
 function renderCanvasDemo(session: CanvasSessionState): void {
 	renderToCanvas(session, {
 		selector: "#status",
-		html: `Pi Canvas demo — rendering, feedback, and checkpoints`,
+		html: `Canvas demo — select any text to comment; sidebar holds the open decision`,
 	});
 
 	renderToCanvas(session, {
 		selector: "#root",
 		html: `<section id="canvas-overview" data-canvas-slot="overview">
-	<header>
-		<h1>Canvas showcase <span class="badge">interactive</span></h1>
-		<p class="muted">Markdown, diagrams, diffs, and structured feedback — side by side with chat.</p>
-	</header>
+	<h1>Token refresh <span class="badge warning">draft</span></h1>
 
-	<div class="grid">
-		<article class="card">
-			<h3>Markdown</h3>
-			<markdown-block>Canvas renders **markdown** natively:
+	<markdown-block>| Option | Ops cost | Failure mode | Fit |
+| --- | --- | --- | --- |
+| Refresh on 401 | low | retry storm | default |
+| Background timer | medium | clock skew | long sessions |
+| Re-auth prompt | none | user friction | fallback |</markdown-block>
 
-- headings, lists, tables
-- inline \`code\`
-- [links](https://example.com)
+	<section id="canvas-flow" data-canvas-slot="flow">
+		<h2>Flow</h2>
+		<mermaid-diagram>sequenceDiagram
+	Client->>API: request
+	API-->>Client: 401
+	Client->>API: refresh(token)
+	API-->>Client: 200 {token'}
+		</mermaid-diagram>
+	</section>
 
-> Prefer this over hand-written HTML prose.</markdown-block>
-		</article>
-
-		<article class="card">
-			<h3>Workflow map</h3>
-			<mermaid-diagram>graph TD
-	A[Ask] --> B[Render]
-	B --> C[Feedback]
-	C --> D[Revise]
-	D --> E[Finalize]
-			</mermaid-diagram>
-		</article>
-	</div>
-
-	<article class="card" id="canvas-scope" data-canvas-slot="scope">
-		<h3>Proposed change <span class="badge warning">draft</span></h3>
-		<code-block language="diff">@@ -1,4 +1,5 @@
--Render plain text only
-+Render semantic HTML
-+Capture structured feedback
- Wait for explicit checkpoint
- Finalize artifact</code-block>
-		<p class="muted">Note what should change in the sidebar, then send it back or approve.</p>
-	</article>
-
-	<aside class="callout info">
-		Checkpoint buttons hand control back to the agent; attention buttons ask it to revise while it works.
-	</aside>
+	<section id="canvas-change" data-canvas-slot="change">
+		<h2>Change</h2>
+		<code-block language="diff">@@ -12,3 +12,6 @@
+-const res = await fetch(url);
++const res = await fetchWithRetry(url, { on: [401] });</code-block>
+		<aside class="callout warning">Second 401 bails instead of looping.</aside>
+	</section>
 </section>`,
 	});
 
 	renderToCanvas(session, {
 		selector: "#sidebar",
-		html: `<section id="canvas-controls" data-canvas-slot="controls">
-	<h3>Your feedback</h3>
-	<label class="field">
-		Scope notes
-		<textarea data-signal="feedback.section.scope" placeholder="What should change?"></textarea>
-	</label>
-	<label class="field">
-		Priority
-		<select data-signal="choice.priority">
-			<option value="low">Low</option>
-			<option value="medium" selected>Medium</option>
-			<option value="high">High</option>
-		</select>
-	</label>
-	<p class="muted" data-show="feedback.section.scope">The agent will read this note when you send it.</p>
+		html: `<section id="canvas-decision" data-canvas-slot="decision">
+	<h3>Open decision</h3>
+	<fieldset>
+		<legend>Refresh strategy</legend>
+		<label><input type="radio" name="strategy" value="on-401" data-signal="choice.strategy" /> Refresh on 401</label>
+		<label><input type="radio" name="strategy" value="timer" data-signal="choice.strategy" /> Background timer</label>
+	</fieldset>
+	<p class="muted">Everything else: select text in the document and comment on it.</p>
 	<div class="toolbar">
-		<button data-event="attention:revise_scope" data-payload='{"source":"demo"}' data-enable-when="feedback.section.scope">Revise scope</button>
-		<button data-event="checkpoint:approve_demo" data-payload='{"source":"demo"}'>Approve demo</button>
+		<button data-event="checkpoint:pick_strategy" data-payload='{"source":"demo"}' data-enable-when="choice.strategy">Confirm choice</button>
 	</div>
 </section>`,
 	});
@@ -443,8 +420,37 @@ function sendCanvasMessage(pi: ExtensionAPI, summary: string, options?: CanvasMe
 	pi.sendUserMessage(summary, options);
 }
 
-function formatAttentionSummary(event: { name: string; payload?: unknown }): string {
+function formatAttentionSummary(event: { name: string; payload?: unknown; source?: string }): string {
+	const comment = readSelectionComment(event);
+	if (comment) {
+		const where = comment.slot ? ` [${comment.slot}]` : "";
+		return `Canvas comment${where} on "${comment.quote}": ${comment.note}`;
+	}
 	return `Canvas attention: ${formatEventName(event.name)}${formatPayloadHint(event.payload)}`;
+}
+
+type SelectionComment = { slot?: string; quote: string; note: string };
+
+/**
+ * Only the server-set source marks a real selection comment. An agent-rendered
+ * attention button can post any payload it likes, so payload shape alone must
+ * never decide how text enters the transcript.
+ */
+function readSelectionComment(event: { payload?: unknown; source?: string }): SelectionComment | undefined {
+	if (event.source !== "selection-comment") return undefined;
+	if (!event.payload || typeof event.payload !== "object") return undefined;
+	const record = event.payload as Record<string, unknown>;
+	const quote = typeof record.quote === "string" ? collapse(record.quote, 200) : "";
+	const note = typeof record.note === "string" ? collapse(record.note, 800) : "";
+	if (!quote || !note) return undefined;
+	const rawSlot = typeof record.slot === "string" ? record.slot.trim() : "";
+	const slot = /^[a-z0-9_-]{1,40}$/i.test(rawSlot) ? rawSlot : undefined;
+	return { slot, quote, note };
+}
+
+function collapse(value: string, maxChars: number): string {
+	const text = value.replace(/\s+/g, " ").trim();
+	return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
 function formatCheckpointSummary(event: { name: string; payload?: unknown }): string {

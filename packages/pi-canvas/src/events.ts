@@ -12,6 +12,12 @@ export type CanvasAttentionEvent = {
 	payload?: unknown;
 	signals: Record<string, unknown>;
 	timestamp: string;
+	/**
+	 * Set by the server, never by the posted body: "control" is a button the
+	 * agent rendered, "selection-comment" is the built-in comment route. Agent
+	 * HTML can forge a payload but cannot forge a source.
+	 */
+	source: "control" | "selection-comment";
 };
 
 export type WaitForEventResult = CanvasCheckpointEvent | { timeout: true };
@@ -107,7 +113,13 @@ export function pushCheckpointEvent(
 
 export async function pushAttentionEvent(
 	session: CanvasSessionState,
-	input: { name: string; payload?: unknown; timestamp?: string; signals?: Record<string, unknown> },
+	input: {
+		name: string;
+		payload?: unknown;
+		timestamp?: string;
+		signals?: Record<string, unknown>;
+		source?: CanvasAttentionEvent["source"];
+	},
 	policy?: AttentionPolicy,
 ): Promise<CanvasAttentionEvent> {
 	const event: CanvasAttentionEvent = {
@@ -115,6 +127,7 @@ export async function pushAttentionEvent(
 		payload: input.payload,
 		signals: input.signals ? { ...input.signals } : { ...session.signals },
 		timestamp: input.timestamp ?? new Date().toISOString(),
+		source: input.source ?? "control",
 	};
 
 	if (policy?.onAttention) {

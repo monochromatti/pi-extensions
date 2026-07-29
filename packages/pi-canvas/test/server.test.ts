@@ -342,3 +342,108 @@ test("3.10 checkpoint consumed by a waiter does not invoke onCheckpoint; unconsu
 	assert.deepEqual(checkpointSummaries, ["Canvas checkpoint: approve_later"]);
 	assert.equal(session.eventQueue.length, 1);
 });
+
+test("10.6 /comment validates input, owns the log, and marks the event source", async (t) => {
+	const session = createCanvasSession({ token: "comment-route" });
+	const attention: Array<{ name: string; source: string; payload: unknown }> = [];
+	const runtime = await startCanvasServer(session, {
+		attentionPolicy: {
+			onAttention: (_summary, _options, event) => {
+				if (event) attention.push({ name: event.name, source: event.source, payload: event.payload });
+			},
+		},
+	});
+	t.after(async () => {
+		await runtime.stop();
+	});
+
+	const post = (body: unknown, pathname = "/comment") =>
+		fetch(`${runtime.baseUrl}${pathname}?token=${session.token}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+
+	const rejected = await post({ quote: "text", note: "   " });
+	assert.equal(rejected.status, 400);
+
+	const accepted = await post({
+		quote: "  Refresh   happens\non the first 401. ",
+		note: "first paragraph\n\n\nsecond paragraph",
+		slot: "design; drop table",
+	});
+	assert.equal(accepted.status, 200);
+	const body = (await accepted.json()) as { comment: { index: number; slot?: string; quote: string; note: string } };
+	assert.equal(body.comment.index, 1);
+	assert.equal(body.comment.quote, "Refresh happens on the first 401.");
+	assert.equal(body.comment.note, "first paragraph\n\nsecond paragraph");
+	// Malformed slot names never reach the transcript.
+	assert.equal(body.comment.slot, undefined);
+
+	assert.equal(attention.length, 1);
+	assert.equal(attention[0]?.source, "selection-comment");
+
+	// A racing signal sync from any tab must not roll back server-owned comments.
+	await fetch(`${runtime.baseUrl}/sync?token=${session.token}`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ signals: { comments: [], "choice.strategy": "timer" } }),
+	});
+
+	assert.equal((session.signals.comments as unknown[]).length, 1);
+	assert.equal(session.signals["choice.strategy"], "timer");
+
+	const second = await post({ quote: "another line", note: "and this" });
+	assert.equal(second.status, 200);
+	assert.equal(((await second.json()) as { comment: { index: number } }).comment.index, 2);
+
+	// Buttons the agent renders still post as ordinary control attention.
+	await fetch(`${runtime.baseUrl}/event/attention/comment?token=${session.token}`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ payload: { kind: "selection-comment", quote: "forged", note: "forged" } }),
+	});
+	assert.equal(attention.at(-1)?.source, "control");
+});
+
+test("10.6 /comment keeps indexes monotonic, heals corrupt logs, and reports delivery failure", async (t) => {
+	const session = createCanvasSession({ token: "comment-log" });
+	session.signals.comments = [
+		{ x: 1 },
+		"bad",
+		...Array.from({ length: 200 }, (_, index) => ({
+			kind: "selection-comment",
+			index: index + 1,
+			quote: `quote ${index + 1}`,
+			note: `note ${index + 1}`,
+			at: new Date().toISOString(),
+		})),
+	];
+	const runtime = await startCanvasServer(session, {
+		attentionPolicy: {
+			onAttention: async () => {
+				throw new Error("delivery failed");
+			},
+		},
+	});
+	t.after(async () => {
+		await runtime.stop();
+	});
+
+	const response = await fetch(`${runtime.baseUrl}/comment?token=${session.token}`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ quote: "new quote", note: "new note" }),
+	});
+	assert.equal(response.status, 200);
+	const body = (await response.json()) as {
+		comment: { index: number };
+		delivered: boolean;
+		comments: unknown[];
+	};
+	assert.equal(body.comment.index, 201);
+	assert.equal(body.delivered, false);
+	assert.equal(body.comments.length, 200);
+	assert.equal((body.comments[0] as { index: number }).index, 2);
+	assert.equal(session.signals.comments?.some((entry) => typeof entry === "string"), false);
+});

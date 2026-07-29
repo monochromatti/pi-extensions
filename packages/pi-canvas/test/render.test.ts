@@ -105,3 +105,10 @@ test("4.7/4.8 render sanitizes dangerous html and blocks disallowed remote asset
 	});
 	assert.deepEqual(blocked, { ok: false, error: "disallowed_remote_asset" });
 });
+
+test("10.5 the client-owned comment layer cannot be targeted by renders", () => {
+	const session = createCanvasSession({ token: "reserved" });
+	const result = renderToCanvas(session, { selector: "#canvas-comment-layer", html: "<p>hijack</p>" });
+	assert.equal(result.ok, false);
+	if (!result.ok) assert.equal(result.error, "selector_not_allowed");
+});

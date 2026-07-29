@@ -100,3 +100,28 @@ test("7.5 README MVP demo script matches acceptance flow at high level", () => {
 		expectContains(readme, required);
 	}
 });
+
+test("10.3 SKILL.md teaches compression, selection comments, and decision-only controls", () => {
+	const skill = readSkill();
+
+	for (const required of [
+		"Compression playbook",
+		"Selection comments (built in)",
+		"Decision points, not feedback prompts",
+		"comments",
+		"choice.",
+	]) {
+		expectContains(skill, required);
+	}
+
+	// Regression: the old recipes taught a generic feedback textarea everywhere.
+	assert.doesNotMatch(skill, /data-signal="feedback\./);
+});
+
+test("10.4 README documents selection comments and reading-load lint rules", () => {
+	const readme = readReadme();
+
+	for (const required of ["Selection comments", "Canvas comment", "Reading-load rules"]) {
+		expectContains(readme, required);
+	}
+});

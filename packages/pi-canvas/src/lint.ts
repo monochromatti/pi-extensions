@@ -63,6 +63,9 @@ export function lintCanvasHtml(context: LintContext): string[] {
 		warnings.push("Long prose is easier to author and better typeset inside <markdown-block> than as hand-written <p> tags.");
 	}
 
+	warnings.push(...lintReadingLoad(context, html, markup));
+	warnings.push(...lintFeedbackControls(markup));
+
 	const cardCount = countMatches(markup, /\bclass\s*=\s*(?:"[^"]*\bcard\b[^"]*"|'[^']*\bcard\b[^']*')/gi);
 	if (cardCount >= 4) {
 		warnings.push(
@@ -117,6 +120,129 @@ export function lintCanvasHtml(context: LintContext): string[] {
 	}
 
 	return warnings;
+}
+
+/** Reading load: canvas exists to compress information, not to host essays. */
+const WALL_OF_TEXT_CHARS = 1200;
+const SLOT_BUDGET_CHARS = 5000;
+const LONG_PARAGRAPH_CHARS = 450;
+
+function lintReadingLoad(context: LintContext, html: string, markup: string): string[] {
+	const warnings: string[] = [];
+	const textLength = readableTextLength(html);
+
+	if (textLength > WALL_OF_TEXT_CHARS && !hasVisualStructure(html, markup)) {
+		warnings.push(
+			`${textLength} characters of unbroken prose with no table, list, diagram, code block, or <details>. Compress it: a comparison table, a mermaid diagram, a bulleted decision list, or a diff usually replaces most of the paragraphs.`,
+		);
+	}
+
+	if (textLength > SLOT_BUDGET_CHARS) {
+		warnings.push(
+			`${textLength} characters in one render is more than a reader scans. Keep the visible layer to headline + evidence, and move supporting detail into <details> or a separate slot rendered on request.`,
+		);
+	}
+
+	const longParagraph = findLongParagraph(html, markup);
+	if (longParagraph) {
+		warnings.push(
+			`Paragraph starting "${longParagraph.preview}" runs ${longParagraph.length} characters. Break it into bullets, a table row per point, or a diagram — dense paragraphs are the format users skip.`,
+		);
+	}
+
+	return warnings;
+}
+
+function hasVisualStructure(html: string, markup: string): boolean {
+	if (/<(code-block|mermaid-diagram|table|details|ul|ol|img)\b/i.test(markup)) return true;
+	if (/\bclass\s*=\s*("[^"]*\b(grid|row|badge)\b[^"]*"|'[^']*\b(grid|row|badge)\b[^']*')/i.test(markup)) {
+		return true;
+	}
+	// Markdown source inside components: tables, lists, task lists, headings.
+	if (/^\s*\|.*\|\s*$/m.test(html) && /\|\s*-{3,}/.test(html)) return true;
+	if (/^\s*(?:[-*+]\s+|\d+\.\s+)/m.test(html)) return true;
+	return false;
+}
+
+/**
+ * Reading load is prose the user must scan now: code, diagram source, table
+ * rows, and collapsed <details> are all cheap to skip, so counting them would
+ * push agents to strip the very structures that make a canvas readable.
+ */
+function readableTextLength(html: string): number {
+	const prose = html
+		.replace(/<(code-block|mermaid-diagram)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+		.replace(/<details\b[^>]*>[\s\S]*?<\/details\s*>/gi, "")
+		.replace(/^\s*\|.*$/gm, "");
+	return visibleTextLength(prose);
+}
+
+function findLongParagraph(html: string, markup: string): { preview: string; length: number } | undefined {
+	for (const chunk of collectProseChunks(html, markup)) {
+		const text = chunk.replace(/\s+/g, " ").trim();
+		if (text.length <= LONG_PARAGRAPH_CHARS) continue;
+		return { preview: `${text.slice(0, 40)}…`, length: text.length };
+	}
+	return undefined;
+}
+
+function collectProseChunks(html: string, markup: string): string[] {
+	const chunks: string[] = [];
+
+	for (const match of html.matchAll(/<markdown-block\b[^>]*>([\s\S]*?)<\/markdown-block\s*>/gi)) {
+		for (const block of (match[1] ?? "").split(/\n\s*\n/)) {
+			// Structured blocks (lists, tables, quotes, headings) are already compact.
+			if (/^\s*(?:[-*+>#]|\d+\.|\|)/m.test(block)) continue;
+			chunks.push(block);
+		}
+	}
+
+	// markup, not html: <p> written inside a code sample is not a paragraph.
+	for (const match of markup.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p\s*>/gi)) {
+		chunks.push((match[1] ?? "").replace(/<[^>]*>/g, " "));
+	}
+
+	return chunks;
+}
+
+/**
+ * Freeform comment boxes are built into the canvas: users select text and
+ * comment on it. Rendered controls should therefore encode decisions the agent
+ * cannot make alone, not a generic "any thoughts?" prompt.
+ */
+const FEEDBACK_SIGNAL_PREFIX = /^(?:feedback|notes?|comments?|review|thoughts|remarks)\b/i;
+
+function lintFeedbackControls(markup: string): string[] {
+	const warnings: string[] = [];
+	const textareas = [...markup.matchAll(/<textarea\b[^>]*>/gi)].map((match) => match[0]);
+	// Free text also arrives via bare <input>; the doctrine is about the channel,
+	// not the tag.
+	const freeTextInputs = [...markup.matchAll(/<input\b[^>]*>/gi)].map((match) => match[0]).filter(isFreeTextInput);
+
+	const genericKeys = [...textareas, ...freeTextInputs]
+		.map((tag) => tag.match(/\bdata-signal\s*=\s*("([^"]*)"|'([^']*)')/i))
+		.map((match) => (match?.[2] ?? match?.[3] ?? "").trim())
+		.filter((key) => key.length > 0 && FEEDBACK_SIGNAL_PREFIX.test(key));
+
+	if (genericKeys.length > 0) {
+		warnings.push(
+			`Feedback box (data-signal="${genericKeys[0]}") duplicates built-in selection comments — users can already select any text and comment on it. Render controls only for open decisions (a choice the agent cannot settle), or drop the panel.`,
+		);
+	}
+
+	if (textareas.length >= 3) {
+		warnings.push(
+			`${textareas.length} freeform text boxes in one render. Per-section comment fields are unnecessary: selection comments carry the quoted context. Keep at most one input, bound to a real open question.`,
+		);
+	}
+
+	return warnings;
+}
+
+function isFreeTextInput(tag: string): boolean {
+	const match = tag.match(/\btype\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i);
+	const type = (match?.[2] ?? match?.[3] ?? match?.[4] ?? "text").trim().toLowerCase();
+	return type === "text" || type === "search";
 }
 
 function stripComponentContent(html: string): string {
